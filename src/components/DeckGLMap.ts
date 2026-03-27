@@ -4475,13 +4475,13 @@ export class DeckGLMap {
         : SITE_VARIANT === 'happy'
           ? [
             { shape: shapes.circle('rgb(34, 197, 94)'), label: 'Positive Event', layerKey: 'positiveEvents' },
-            { shape: shapes.circle('rgb(234, 179, 8)'), label: 'Breakthrough', layerKey: '' },
+            { shape: shapes.circle('rgb(234, 179, 8)'), label: 'Breakthrough', layerKey: 'positiveEvents' },
             { shape: shapes.circle('rgb(74, 222, 128)'), label: 'Act of Kindness', layerKey: 'kindness' },
             { shape: shapes.circle('rgb(255, 100, 50)'), label: 'Natural Event', layerKey: 'natural' },
             { shape: shapes.square('rgb(34, 180, 100)'), label: 'Happy Country', layerKey: 'happiness' },
             { shape: shapes.circle('rgb(74, 222, 128)'), label: 'Species Recovery Zone', layerKey: 'speciesRecovery' },
             { shape: shapes.circle('rgb(255, 200, 50)'), label: 'Renewable Installation', layerKey: 'renewableInstallations' },
-            { shape: shapes.circle('rgb(160, 100, 255)'), label: t('components.deckgl.legend.aircraft'), layerKey: '' },
+            { shape: shapes.circle('rgb(160, 100, 255)'), label: t('components.deckgl.legend.aircraft'), layerKey: 'flights' },
           ]
           : [
             { shape: shapes.circle('rgb(255, 68, 68)'), label: t('components.deckgl.legend.highAlert'), layerKey: 'hotspots' },
@@ -4672,6 +4672,7 @@ export class DeckGLMap {
     else if (!this.state.layers.weatherRadar && prevRadar) this.stopWeatherRadar();
     if (this.state.layers.cyberThreats && !prevCyber && !this.aptGroupsLoaded) this.loadAptGroups();
     this.render(); // Debounced
+    this.updateLegend();
 
     Object.entries(this.state.layers).forEach(([key, value]) => {
       const toggle = this.container.querySelector(`.layer-toggle[data-layer="${key}"] input`) as HTMLInputElement;
@@ -5373,6 +5374,7 @@ export class DeckGLMap {
       const toggle = this.container.querySelector(`.layer-toggle[data-layer="${layer}"] input`) as HTMLInputElement;
       if (toggle) toggle.checked = true;
       this.render();
+      this.updateLegend();
       this.onLayerChange?.(layer, true, 'programmatic');
       this.enforceLayerLimit();
     }
@@ -5384,6 +5386,7 @@ export class DeckGLMap {
     const toggle = this.container.querySelector(`.layer-toggle[data-layer="${layer}"] input`) as HTMLInputElement;
     if (toggle) toggle.checked = this.state.layers[layer];
     this.render();
+    this.updateLegend();
     this.onLayerChange?.(layer, this.state.layers[layer], 'programmatic');
     this.enforceLayerLimit();
   }
