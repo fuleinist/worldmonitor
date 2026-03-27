@@ -4243,6 +4243,7 @@ export class DeckGLMap {
           this.state.layers[layer] = (input as HTMLInputElement).checked;
           if (layer === 'flights') this.manageAircraftTimer((input as HTMLInputElement).checked);
           this.render();
+          this.updateLegendVisibility();
           this.onLayerChange?.(layer, (input as HTMLInputElement).checked, 'user');
           if (layer === 'ciiChoropleth') {
             const ciiLeg = this.container.querySelector('#ciiChoroplethLegend') as HTMLElement | null;
@@ -4665,6 +4666,7 @@ export class DeckGLMap {
       const toggle = this.container.querySelector(`.layer-toggle[data-layer="${key}"] input`) as HTMLInputElement;
       if (toggle) toggle.checked = value;
     });
+    this.updateLegendVisibility();
   }
 
   public getState(): DeckMapState {
@@ -5361,6 +5363,7 @@ export class DeckGLMap {
       const toggle = this.container.querySelector(`.layer-toggle[data-layer="${layer}"] input`) as HTMLInputElement;
       if (toggle) toggle.checked = true;
       this.render();
+      this.updateLegendVisibility();
       this.onLayerChange?.(layer, true, 'programmatic');
       this.enforceLayerLimit();
     }
@@ -5387,42 +5390,41 @@ export class DeckGLMap {
     const visibleLabels: Set<string> = new Set();
 
     // Map layers to their legend labels
-    const layerToLabels: Record<string, string[]> = {
-      startupHub: ['Startup Hub'],
-      techHQ: ['Tech HQ'],
-      accelerator: ['Accelerator'],
-      cloudRegion: ['Cloud Region'],
-      datacenter: ['Datacenter'],
-      stockExchange: ['Stock Exchange'],
-      financialCenter: ['Financial Center'],
-      centralBank: ['Central Bank'],
-      commodityHub: ['Commodity Hub'],
-      waterway: ['Waterway'],
-      aircraft: ['Aircraft'],
+    const layerToLabels: Partial<Record<keyof MapLayers, string[]>> = {
+      startupHubs: ['Startup Hub'],
+      techHQs: ['Tech HQ'],
+      accelerators: ['Accelerator'],
+      cloudRegions: ['Cloud Region'],
+      datacenters: ['Datacenter'],
+      stockExchanges: ['Stock Exchange'],
+      financialCenters: ['Financial Center'],
+      centralBanks: ['Central Bank'],
+      commodityHubs: ['Commodity Hub'],
+      waterways: ['Waterway'],
+      flights: ['Aircraft'],
       nuclear: ['Nuclear'],
-      naturalEvents: ['Natural Event', 'Positive Event', 'Breakthrough', 'Act of Kindness'],
-      conflictZones: ['HIGH', 'ELEVATED', 'MONITORING'],
-      cyberThreats: ['APT'],
+      bases: ['Base'],
+      natural: ['Natural Event', 'Positive Event', 'Breakthrough', 'Act of Kindness'],
+      conflicts: ['High Alert', 'Elevated', 'Monitoring'],
+      cyberThreats: ['Cyber Threat'],
       positiveEvents: ['Positive Event', 'Breakthrough', 'Act of Kindness', 'Species Recovery Zone', 'Renewable Installation'],
-      aiDataCenters: ['AI Data Center'],
       techEvents: ['Tech Event'],
     };
 
     // Collect visible labels based on active layers
-    for (const [layer, labels] of Object.entries(layerToLabels)) {
-      if (this.state.layers[layer as keyof MapLayers]) {
-        labels.forEach(label => visibleLabels.add(label));
+    for (const key of Object.keys(layerToLabels) as Array<keyof MapLayers>) {
+      if (this.state.layers[key]) {
+        layerToLabels[key]!.forEach(label => visibleLabels.add(label));
       }
     }
 
     // Update legend item visibility
-    const legendItems = legend.querySelectorAll('.legend-item');
+    const legendItems = legend.querySelectorAll<HTMLElement>('.legend-item');
     legendItems.forEach(item => {
       const labelEl = item.querySelector('.legend-label');
       if (labelEl) {
         const labelText = labelEl.textContent?.trim() || '';
-        const isVisible = visibleLabels.has(labelText);
-        (item as HTMLElement).style.display = isVisible ? '' : 'none';
+        item.style.display = visibleLabels.has(labelText) ? '' : 'none';
       }
     });
   }
