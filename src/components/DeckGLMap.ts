@@ -331,7 +331,6 @@ export class DeckGLMap {
   private state: DeckMapState;
   private popup: MapPopup;
   private isResizing = false;
-  private legendContainer: HTMLElement | null = null;
   private savedTopLat: number | null = null;
   private correctingCenter = false;
 
@@ -4456,7 +4455,7 @@ export class DeckGLMap {
     };
 
     const isLight = getCurrentTheme() === 'light';
-    const legendItems = SITE_VARIANT === 'tech'
+    const legendItems: { shape: string; label: string; layerKey: keyof MapLayers }[] = SITE_VARIANT === 'tech'
       ? [
         { shape: shapes.circle(isLight ? 'rgb(22, 163, 74)' : 'rgb(0, 255, 150)'), label: t('components.deckgl.legend.startupHub'), layerKey: 'startupHubs' },
         { shape: shapes.circle('rgb(100, 200, 255)'), label: t('components.deckgl.legend.techHQ'), layerKey: 'techHQs' },
@@ -4495,7 +4494,7 @@ export class DeckGLMap {
 
     legend.innerHTML = `
       <span class="legend-label-title">${t('components.deckgl.legend.title')}</span>
-      ${legendItems.map(({ shape, label, layerKey }) => `<span class="legend-item"${layerKey ? ` data-layer="${layerKey}"` : ''}>${shape}<span class="legend-label">${label}</span></span>`).join('')}
+      ${legendItems.map(({ shape, label, layerKey }) => `<span class="legend-item" data-layer="${layerKey}">${shape}<span class="legend-label">${label}</span></span>`).join('')}
     `;
 
     // CII choropleth gradient legend (shown when layer is active)
@@ -4515,16 +4514,14 @@ export class DeckGLMap {
     legend.appendChild(ciiLegend);
 
     this.container.appendChild(legend);
-    this.legendContainer = legend;
     this.updateLegend();
   }
 
   private updateLegend(): void {
-    if (!this.legendContainer) return;
-    this.legendContainer.querySelectorAll<HTMLElement>('.legend-item[data-layer]').forEach(item => {
-      const layerKey = item.dataset.layer as keyof MapLayers;
-      const isVisible = this.state.layers[layerKey] ?? false;
-      item.style.display = isVisible ? '' : 'none';
+    this.container.querySelectorAll<HTMLElement>('.legend-item[data-layer]').forEach(item => {
+      const layerKey = item.dataset.layer;
+      if (!layerKey || !(layerKey in this.state.layers)) return;
+      item.style.display = this.state.layers[layerKey as keyof MapLayers] ? '' : 'none';
     });
   }
 
