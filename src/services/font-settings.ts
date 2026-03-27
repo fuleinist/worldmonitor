@@ -5,7 +5,6 @@ const EVENT_NAME = 'wm-font-changed';
 
 const ALLOWED: FontFamily[] = ['mono', 'system'];
 
-
 export function getFontFamily(): FontFamily {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
