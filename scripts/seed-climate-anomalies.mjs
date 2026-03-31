@@ -210,9 +210,11 @@ async function fetchClimateAnomalies() {
     console.log('[CLIMATE] Normals not available — using 30-day rolling fallback');
   }
 
-  // If normals are available, fetch 7 days of data for current period comparison
-  // If normals are NOT available, fetch 30 days so the fallback can split into baseline + current
-  const daysToFetch = hasNormals ? 7 : 30;
+  // If normals are available, fetch 14 days to account for Open-Meteo archive API lag (3-5 days).
+  // With 14 days we reliably get 7+ valid data points for the slice(-7) call even when the
+  // most recent days return null due to the archive lag. If normals are NOT available, fetch
+  // 30 days so the fallback can split into baseline + current.
+  const daysToFetch = hasNormals ? 14 : 30;
   const startDate = new Date(Date.now() - daysToFetch * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
   const anomalies = [];
