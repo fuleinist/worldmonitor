@@ -179,9 +179,12 @@ async function fetchClimateAnomalies() {
     console.log('[CLIMATE] Normals not available — using 30-day rolling fallback');
   }
 
-  // If normals are available, fetch 7 days of data for current period comparison
-  // If normals are NOT available, fetch 30 days so the fallback can split into baseline + current
-  const daysToFetch = hasNormals ? 7 : 30;
+  // Always fetch 30 days: zones with normals use slice(-7) as the current period;
+  // zones without normals use slice(0,-7) as the rolling 23-day baseline.
+  // Previously this fetched only 7 days when normals were available, which broke
+  // the fallback for zones present in ALL_ZONES but absent from the Redis normals
+  // cache (their baselineTemps array was always empty, silently returning null).
+  const daysToFetch = 30;
   const startDate = new Date(Date.now() - daysToFetch * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
   const anomalies = [];
