@@ -117,7 +117,12 @@ async function fetchZone(zone, normals, startDate, endDate) {
     const baselineTemps = temps.slice(0, -7);
     const baselinePrecips = precips.slice(0, -7);
 
-    if (baselineTemps.length < 7) return null;
+    if (baselineTemps.length < 7) {
+      // Silent drop when hasNormals=true but zone has no matching normal AND
+      // insufficient days for fallback — increment failures counter for visibility.
+      console.log(`[CLIMATE] ${zone.name}: missing normal AND insufficient fallback data (${baselineTemps.length} baseline days)`);
+      return null;
+    }
 
     const baselineTempMean = avg(baselineTemps);
     const baselinePrecipMean = avg(baselinePrecips);

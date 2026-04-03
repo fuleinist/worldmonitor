@@ -39,7 +39,7 @@ export default async function handler(req) {
 
     const rawBody = await response.text();
 
-    let normalizedBody: string;
+    let normalizedBody;
     let isEmpty = false;
 
     try {
