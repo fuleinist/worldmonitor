@@ -97,6 +97,9 @@ async function fetchZone(zone, startDate, endDate) {
 async function fetchClimateAnomalies() {
   const endDate = new Date().toISOString().slice(0, 10);
   const startDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  // Fix(P1): always fetch 30d — the old "normals mode" used daysToFetch=7 when hasNormals=true,
+  // which broke the 7+7 rolling split for zones absent from the Redis normals cache
+  // (baselineTemps became [] → silent null returns for those zones).
 
   const anomalies = [];
   let failures = 0;
