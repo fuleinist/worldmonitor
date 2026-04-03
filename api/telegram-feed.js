@@ -37,17 +37,30 @@ export default async function handler(req) {
       headers: getRelayHeaders({ Accept: 'application/json' }),
     }, 15000);
 
-    const body = await response.text();
+    const rawBody = await response.text();
 
-    let cacheControl = 'public, max-age=30, s-maxage=120, stale-while-revalidate=60, stale-if-error=120';
+    let normalizedBody: string;
+    let isEmpty = false;
+
     try {
-      const parsed = JSON.parse(body);
-      if (!parsed || parsed.count === 0 || !parsed.items || parsed.items.length === 0) {
-        cacheControl = 'public, max-age=0, s-maxage=15, stale-while-revalidate=10';
-      }
-    } catch {}
+      const parsed = JSON.parse(rawBody);
+      // Normalize: if relay returns messages[] instead of items[], convert to items[]
+      const relayItems = Array.isArray(parsed.messages) ? parsed.messages
+        : Array.isArray(parsed.items) ? parsed.items
+        : [];
+      isEmpty = parsed.count === 0 || relayItems.length === 0;
+      normalizedBody = JSON.stringify({ ...parsed, items: relayItems });
+    } catch {
+      // Non-JSON or parse error — pass through as-is
+      normalizedBody = rawBody;
+      isEmpty = true;
+    }
 
-    return buildRelayResponse(response, body, {
+    const cacheControl = isEmpty
+      ? 'public, max-age=0, s-maxage=15, stale-while-revalidate=10'
+      : 'public, max-age=30, s-maxage=120, stale-while-revalidate=60, stale-if-error=120';
+
+    return buildRelayResponse(response, normalizedBody, {
       'Cache-Control': response.ok ? cacheControl : 'no-store',
       ...corsHeaders,
     });
