@@ -117,7 +117,10 @@ async function fetchZone(zone, normals, startDate, endDate) {
     const baselineTemps = temps.slice(0, -7);
     const baselinePrecips = precips.slice(0, -7);
 
-    if (baselineTemps.length < 7) return null;
+    if (baselineTemps.length < 7) {
+      console.log(`[CLIMATE] ${zone.name}: insufficient data for rolling fallback (${baselineTemps.length} days) — dropping zone`);
+      return null;
+    }
 
     const baselineTempMean = avg(baselineTemps);
     const baselinePrecipMean = avg(baselinePrecips);

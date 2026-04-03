@@ -130,8 +130,8 @@ async function fetchAllZoneNormals() {
     }
   }
 
-  if (allNormals.length === 0) {
-    throw new Error(`No zone normals fetched (${failures} failures)`);
+  if (allNormals.length < MIN_ZONES) {
+    throw new Error(`Only ${allNormals.length}/${MIN_ZONES} minimum zones fetched (${failures} failures) — skipping write to avoid partial cache poisoning`);
   }
 
   console.log(`[ZONE_NORMALS] Completed: ${allNormals.length}/${ALL_ZONES.length} zones`);

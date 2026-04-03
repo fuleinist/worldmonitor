@@ -875,7 +875,7 @@ function calcConflictScore(data: CountryData, countryCode: string): number {
     const h = data.hapiSummary;
     // Use log scale to prevent compression — Iran (1549 events) should score >> China (46 events),
     // rather than both landing at the 60-cap due to linear multiplication.
-    hapiFallback = Math.min(60, Math.log1p(h.eventsPoliticalViolence * multiplier) * 12);
+    hapiFallback = Math.min(60, Math.log1p(h.eventsPoliticalViolence) * multiplier * 12);
   }
 
   let newsFloor = 0;
