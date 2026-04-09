@@ -971,6 +971,16 @@ function getTrend(code: string, current: number): CountryScore['trend'] {
   return 'stable';
 }
 
+function getDisplacementBoost(outflow: number): number {
+  return outflow >= 10_000_000 ? 12
+    : outflow >= 5_000_000 ? 10
+    : outflow >= 1_000_000 ? 8
+    : outflow >= 500_000 ? 6
+    : outflow >= 100_000 ? 4
+    : outflow >= 10_000 ? 2
+    : 0;
+}
+
 export function calculateCII(): CountryScore[] {
   const scores: CountryScore[] = [];
   const focalUrgencies = focalPointDetector.getCountryUrgencyMap();
@@ -1003,13 +1013,7 @@ export function calculateCII(): CountryScore[] {
       : focalUrgency === 'elevated' ? 4
       : 0;
 
-    const displacementBoost = data.displacementOutflow >= 10_000_000 ? 12
-      : data.displacementOutflow >= 5_000_000 ? 10
-      : data.displacementOutflow >= 1_000_000 ? 8
-      : data.displacementOutflow >= 500_000 ? 6
-      : data.displacementOutflow >= 100_000 ? 4
-      : data.displacementOutflow >= 10_000 ? 2
-      : 0;
+    const displacementBoost = getDisplacementBoost(data.displacementOutflow);
     const climateBoost = data.climateStress;
 
     const advisoryBoost = getAdvisoryBoost(data);
@@ -1063,13 +1067,7 @@ export function getCountryScore(code: string): number | null {
   const focalBoost = focalUrgency === 'critical' ? 8
     : focalUrgency === 'elevated' ? 4
     : 0;
-  const displacementBoost = data.displacementOutflow >= 10_000_000 ? 12
-    : data.displacementOutflow >= 5_000_000 ? 10
-    : data.displacementOutflow >= 1_000_000 ? 8
-    : data.displacementOutflow >= 500_000 ? 6
-    : data.displacementOutflow >= 100_000 ? 4
-    : data.displacementOutflow >= 10_000 ? 2
-    : 0;
+  const displacementBoost = getDisplacementBoost(data.displacementOutflow);
   const climateBoost = data.climateStress;
   const advisoryBoost = getAdvisoryBoost(data);
   const supplementalSignalBoost = getSupplementalSignalBoost(data);
