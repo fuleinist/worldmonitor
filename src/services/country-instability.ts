@@ -873,7 +873,7 @@ function calcConflictScore(data: CountryData, countryCode: string): number {
   let hapiFallback = 0;
   if (events.length === 0 && data.hapiSummary) {
     const h = data.hapiSummary;
-    hapiFallback = Math.min(60, h.eventsPoliticalViolence * 3 * multiplier);
+    hapiFallback = Math.min(60, Math.log1p(h.eventsPoliticalViolence * multiplier) * 12);
   }
 
   let newsFloor = 0;
@@ -1003,8 +1003,12 @@ export function calculateCII(): CountryScore[] {
       : focalUrgency === 'elevated' ? 4
       : 0;
 
-    const displacementBoost = data.displacementOutflow >= 1_000_000 ? 8
+    const displacementBoost = data.displacementOutflow >= 10_000_000 ? 12
+      : data.displacementOutflow >= 5_000_000 ? 10
+      : data.displacementOutflow >= 1_000_000 ? 8
+      : data.displacementOutflow >= 500_000 ? 6
       : data.displacementOutflow >= 100_000 ? 4
+      : data.displacementOutflow >= 10_000 ? 2
       : 0;
     const climateBoost = data.climateStress;
 
@@ -1059,8 +1063,12 @@ export function getCountryScore(code: string): number | null {
   const focalBoost = focalUrgency === 'critical' ? 8
     : focalUrgency === 'elevated' ? 4
     : 0;
-  const displacementBoost = data.displacementOutflow >= 1_000_000 ? 8
+  const displacementBoost = data.displacementOutflow >= 10_000_000 ? 12
+    : data.displacementOutflow >= 5_000_000 ? 10
+    : data.displacementOutflow >= 1_000_000 ? 8
+    : data.displacementOutflow >= 500_000 ? 6
     : data.displacementOutflow >= 100_000 ? 4
+    : data.displacementOutflow >= 10_000 ? 2
     : 0;
   const climateBoost = data.climateStress;
   const advisoryBoost = getAdvisoryBoost(data);
