@@ -135,6 +135,8 @@ export const listSanctionsPressure: SanctionsServiceHandler['listSanctionsPressu
       programs: rebuildProgramCounts(filteredEntries),
       totalCount: filteredEntries.length,
       newEntryCount: filteredEntries.filter((e) => e.isNew).length,
+      vesselCount: filteredEntries.filter((e) => e.entityType === 'SANCTIONS_ENTITY_TYPE_VESSEL').length,
+      aircraftCount: filteredEntries.filter((e) => e.entityType === 'SANCTIONS_ENTITY_TYPE_AIRCRAFT').length,
     };
   } catch {
     return emptyResponse();
