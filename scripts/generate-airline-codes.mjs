@@ -45,7 +45,8 @@ try {
   );
   if (generatedMatch) {
     const block = generatedMatch[1];
-    const entryRe = /\['([A-Z]{3})',\s*\{ iata:\s*'([A-Z0-9]{2})',\s*name:\s*(.+?) \}\]/g;
+    // Match double-quoted format that JSON.stringify produces: ["AAL", { iata: "AA", name: "American Airlines" }]
+    const entryRe = /\[\"([A-Z0-9][A-Z0-9\-\.]{1,2})\",\s*\{\s*iata:\s*\"([A-Z0-9\-\.]{2})\",\s*name:\s*(.+?)\s*\}\]/g;
     let m;
     while ((m = entryRe.exec(block)) !== null) {
       previousIcaos.add(m[1]);
@@ -109,12 +110,17 @@ try {
   process.exit(1);
 }
 
-const updated = content.replace(
+const updatedContent = content.replace(
   /const GENERATED = new Map<string,\s*\{\s*iata:\s*string;\s*name:\s*string\s*\}>\(\[\s*\n[\s\S]*?\n\]\);/,
   `const GENERATED = ${generatedBlock};`
 );
 
-writeFileSync(AIRLINE_CODES_PATH, updated, 'utf8');
+if (updatedContent === content) {
+  console.error(`ERROR: GENERATED block not found in ${AIRLINE_CODES_PATH} — file was not updated.`);
+  process.exit(1);
+}
+
+writeFileSync(AIRLINE_CODES_PATH, updatedContent, 'utf8');
 
 // ─── Summary ─────────────────────────────────────────────────────────────────
 
