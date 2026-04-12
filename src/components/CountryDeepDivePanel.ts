@@ -339,7 +339,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
 
       const top = this.el('div', 'cdp-news-top');
       const tier = item.tier ?? getSourceTier(item.source);
-      top.append(this.badge(`Tier ${tier}`, `cdp-tier-badge tier-${Math.max(1, Math.min(4, tier))}`));
+      top.append(this.badge(`Tier ${tier}`, `cdp-tier-badge tier-${Math.max(1, Math.min(4, tier))}`, t('countryBrief.tierBadgeTooltip')));
 
       const severity = this.toThreatLevel(item.threat?.level);
       const levelKey = severity === 'info' ? 'low' : severity === 'medium' ? 'moderate' : severity;
@@ -2472,8 +2472,10 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     return this.el('div', 'cdp-empty', text);
   }
 
-  private badge(text: string, className: string): HTMLElement {
-    return this.el('span', className, text);
+  private badge(text: string, className: string, title?: string): HTMLElement {
+    const el = this.el('span', className, text);
+    if (title) el.title = title;
+    return el;
   }
 
   private formatBrief(text: string, headlineCount = 0): string {
