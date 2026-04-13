@@ -182,7 +182,7 @@ function validateQuietHoursArgs(args: {
     throw new ConvexError("quietHoursEnd must be an integer 0–23");
   }
   if (args.quietHoursStart !== undefined && args.quietHoursEnd !== undefined && args.quietHoursStart === args.quietHoursEnd) {
-    throw new ConvexError("quietHoursStart and quietHoursEnd cannot be equal — set the same value for both means quiet hours are always active; use the enabled flag instead");
+    throw new ConvexError("quietHoursStart and quietHoursEnd cannot be equal — setting the same value for both means quiet hours are always active; use the enabled flag instead");
   }
   if (args.quietHoursTimezone !== undefined) {
     try {

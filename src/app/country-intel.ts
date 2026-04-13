@@ -253,8 +253,8 @@ export class CountryIntelManager implements AppModule {
       const otherPos = CountryIntelManager.firstMentionPosition(t, otherCountryTerms);
       return ourPos !== Infinity && (otherPos === Infinity || ourPos <= otherPos);
     });
-    const seen = new Set<string>();
     const deduped: typeof filteredNews = [];
+    const seen = new Set<string>();
     for (const n of filteredNews) {
       const normalized = n.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
       if (normalized.length > 0 && !seen.has(normalized)) {
