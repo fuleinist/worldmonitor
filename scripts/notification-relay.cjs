@@ -132,10 +132,12 @@ function isInQuietHours(rule) {
   if (!rule.quietHoursEnabled) return false;
   const start = rule.quietHoursStart ?? 22;
   const end = rule.quietHoursEnd ?? 7;
+  // start === end means quiet hours are not meaningful — treat as disabled
+  if (start === end) return false;
   const tz = rule.quietHoursTimezone ?? 'UTC';
   const localHour = toLocalHour(Date.now(), tz);
   if (localHour === -1) return false;
-  // spans midnight when start >= end (e.g. 23:00-07:00)
+  // spans midnight when start > end (e.g. 23:00-07:00)
   return start < end
     ? localHour >= start && localHour < end
     : localHour >= start || localHour < end;
@@ -281,7 +283,7 @@ async function processFlushQuietHeld(event) {
 
 // ── Delivery: Telegram ────────────────────────────────────────────────────────
 
-async function sendTelegram(userId, chatId, text) {
+async function sendTelegram(userId, chatId, text, _retryCount = 0) {
   if (!TELEGRAM_BOT_TOKEN) {
     console.warn('[relay] Telegram: TELEGRAM_BOT_TOKEN not set — skipping');
     return false;
@@ -302,10 +304,14 @@ async function sendTelegram(userId, chatId, text) {
     return false;
   }
   if (res.status === 429) {
+    if (_retryCount >= 1) {
+      console.warn(`[relay] Telegram 429 retry exhausted for ${userId} — giving up`);
+      return false;
+    }
     const body = await res.json().catch(() => ({}));
     const wait = ((body.parameters?.retry_after ?? 5) + 1) * 1000;
     await new Promise(r => setTimeout(r, wait));
-    return sendTelegram(userId, chatId, text); // single retry
+    return sendTelegram(userId, chatId, text, _retryCount + 1); // single retry with counter
   }
   if (res.status === 401) {
     console.error('[relay] Telegram 401 Unauthorized — TELEGRAM_BOT_TOKEN is invalid or belongs to a different bot; correct the Railway env var to restore Telegram delivery');
@@ -679,9 +685,6 @@ async function processEvent(event) {
     console.error('[relay] Failed to fetch alert rules:', err.message);
     return;
   }
-
-  // Shadow log the score on every rss_alert event (fire-and-forget, no await needed)
-  if (event.eventType === 'rss_alert') shadowLogScore(event).catch(() => {});
 
   const matching = enabledRules.filter(r =>
     (!r.digestMode || r.digestMode === 'realtime') &&   // skip digest-mode rules — handled by seed-digest-notifications cron
