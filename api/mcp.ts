@@ -76,7 +76,7 @@ type ToolDef = CacheToolDef | RpcToolDef;
 const TOOL_REGISTRY: ToolDef[] = [
   {
     name: 'get_market_data',
-    description: 'Real-time equity quotes, commodity prices (including gold futures GC=F), crypto prices, forex FX rates (USD/EUR, USD/JPY etc.), sector performance, ETF flows, and Gulf market quotes from WorldMonitor\'s curated bootstrap cache.',
+    description: 'Real-time equity quotes, commodity prices (including gold futures GC=F), crypto prices, forex FX rates (USD/EUR, USD/JPY etc.), sector performance, ETF flows, Gulf market quotes, crypto sector performance, stablecoin market data, and wholesale FX rates from WorldMonitor\'s curated bootstrap cache.',
     inputSchema: { type: 'object', properties: {}, required: [] },
     _cacheKeys: [
       'market:stocks-bootstrap:v1',
@@ -86,6 +86,9 @@ const TOOL_REGISTRY: ToolDef[] = [
       'market:etf-flows:v1',
       'market:gulf-quotes:v1',
       'market:fear-greed:v1',
+      'market:crypto-sectors:v1',
+      'market:stablecoins:v1',
+      'shared:fx-rates:v1',
     ],
     _seedMetaKey: 'seed-meta:market:stocks',
     _maxStaleMin: 30,
@@ -154,7 +157,7 @@ const TOOL_REGISTRY: ToolDef[] = [
   },
   {
     name: 'get_economic_data',
-    description: 'Macro economic indicators: Fed Funds rate (FRED), economic calendar events, fuel prices, ECB FX rates, EU yield curve, earnings calendar, COT positioning, energy storage data, BIS household debt service ratio (DSR, quarterly, leading indicator of household financial stress across ~40 advanced economies), and BIS residential + commercial property price indices (real, quarterly).',
+    description: 'Macro economic indicators: Fed Funds rate (FRED), economic calendar events, fuel prices, ECB FX rates, EU yield curve, earnings calendar, COT positioning, energy storage, IMF WEO macro (inflation, GDP, debt, 200+ countries), national debt-to-GDP timeseries, Big Mac PPP index, FAO Food Price Index, and Eurostat EU statistics from WorldMonitor\'s seed cache.',
     inputSchema: { type: 'object', properties: {}, required: [] },
     _cacheKeys: [
       'economic:fred:v1:FEDFUNDS:0',
@@ -165,65 +168,14 @@ const TOOL_REGISTRY: ToolDef[] = [
       'economic:spending:v1',
       'market:earnings-calendar:v1',
       'market:cot:v1',
-      'economic:bis:dsr:v1',
-      'economic:bis:property-residential:v1',
-      'economic:bis:property-commercial:v1',
+      'economic:imf:macro:v2',
+      'economic:national-debt:v1',
+      'economic:bigmac:v1',
+      'economic:fao-ffpi:v1',
+      'economic:eurostat-country-data:v1',
     ],
     _seedMetaKey: 'seed-meta:economic:econ-calendar',
     _maxStaleMin: 1440,
-    _freshnessChecks: [
-      { key: 'seed-meta:economic:econ-calendar', maxStaleMin: 1440 },
-      // Per-dataset BIS seed-meta keys — the aggregate
-      // `seed-meta:economic:bis-extended` would report "fresh" even if only
-      // one of the three datasets (DSR / SPP / CPP) is current, matching the
-      // false-freshness bug already fixed for /api/health and resilience.
-      { key: 'seed-meta:economic:bis-dsr', maxStaleMin: 1440 }, // 12h cron × 2
-      { key: 'seed-meta:economic:bis-property-residential', maxStaleMin: 1440 },
-      { key: 'seed-meta:economic:bis-property-commercial', maxStaleMin: 1440 },
-    ],
-  },
-  {
-    name: 'get_country_macro',
-    description: 'Per-country macroeconomic indicators from IMF WEO (~210 countries, monthly cadence). Bundles fiscal/external balance (inflation, current account, gov revenue/expenditure/primary balance, CPI), growth & per-capita (real GDP growth, GDP/capita USD & PPP, savings & investment rates, savings-investment gap), labor & demographics (unemployment, population), and external trade (current account USD, import/export volume % changes). Latest available year per series. Use for country-level economic screening, peer benchmarking, and stagflation/imbalance flags. NOTE: export/import LEVELS in USD (exportsUsd, importsUsd, tradeBalanceUsd) are returned as null — WEO retracted broad coverage for BX/BM indicators in 2026-04; use currentAccountUsd or volume changes (import/exportVolumePctChg) instead.',
-    inputSchema: { type: 'object', properties: {}, required: [] },
-    _cacheKeys: [
-      'economic:imf:macro:v2',
-      'economic:imf:growth:v1',
-      'economic:imf:labor:v1',
-      'economic:imf:external:v1',
-    ],
-    _seedMetaKey: 'seed-meta:economic:imf-macro',
-    _maxStaleMin: 100800, // monthly WEO release; 70d = 2× interval (absorbs one missed run)
-    _freshnessChecks: [
-      { key: 'seed-meta:economic:imf-macro', maxStaleMin: 100800 },
-      { key: 'seed-meta:economic:imf-growth', maxStaleMin: 100800 },
-      { key: 'seed-meta:economic:imf-labor', maxStaleMin: 100800 },
-      { key: 'seed-meta:economic:imf-external', maxStaleMin: 100800 },
-    ],
-  },
-  {
-    name: 'get_eu_housing_cycle',
-    description: 'Eurostat annual house price index (prc_hpi_a, base 2015=100) for all 27 EU members plus EA20 and EU27_2020 aggregates. Each country entry includes the latest value, prior value, date, unit, and a 10-year sparkline series. Complements BIS WS_SPP with broader EU coverage for the Housing cycle tile.',
-    inputSchema: { type: 'object', properties: {}, required: [] },
-    _cacheKeys: ['economic:eurostat:house-prices:v1'],
-    _seedMetaKey: 'seed-meta:economic:eurostat-house-prices',
-    _maxStaleMin: 60 * 24 * 50, // weekly cron, annual data
-  },
-  {
-    name: 'get_eu_quarterly_gov_debt',
-    description: 'Eurostat quarterly general government gross debt (gov_10q_ggdebt, %GDP) for all 27 EU members plus EA20 and EU27_2020 aggregates. Each country entry includes latest value, prior value, quarter label, and an 8-quarter sparkline series. Provides fresher debt-trajectory signal than annual IMF GGXWDG_NGDP for EU panels.',
-    inputSchema: { type: 'object', properties: {}, required: [] },
-    _cacheKeys: ['economic:eurostat:gov-debt-q:v1'],
-    _seedMetaKey: 'seed-meta:economic:eurostat-gov-debt-q',
-    _maxStaleMin: 60 * 24 * 14, // quarterly data, 2-day cron
-  },
-  {
-    name: 'get_eu_industrial_production',
-    description: 'Eurostat monthly industrial production index (sts_inpr_m, NACE B-D industry excl. construction, SCA, base 2021=100) for all 27 EU members plus EA20 and EU27_2020 aggregates. Each country entry includes latest value, prior value, month label, and a 12-month sparkline series. Leading indicator of real-economy activity used by the "Real economy pulse" sparkline.',
-    inputSchema: { type: 'object', properties: {}, required: [] },
-    _cacheKeys: ['economic:eurostat:industrial-production:v1'],
-    _seedMetaKey: 'seed-meta:economic:eurostat-industrial-production',
-    _maxStaleMin: 60 * 24 * 5, // monthly data, daily cron
   },
   {
     name: 'get_prediction_markets',
@@ -268,12 +220,17 @@ const TOOL_REGISTRY: ToolDef[] = [
   },
   {
     name: 'get_supply_chain_data',
-    description: 'Dry bulk shipping stress index, customs revenue flows, and COMTRADE bilateral trade data. Tracks global supply chain pressure and trade disruptions.',
+    description: 'Dry bulk shipping stress index, customs revenue flows, COMTRADE bilateral trade data, Hormuz tracker, port chokepoint reference data, active disruptions, energy crisis policies, and energy intelligence feeds. Tracks global supply chain pressure and trade disruptions.',
     inputSchema: { type: 'object', properties: {}, required: [] },
     _cacheKeys: [
       'supply_chain:shipping_stress:v1',
       'trade:customs-revenue:v1',
       'comtrade:flows:v1',
+      'supply_chain:hormuz_tracker:v1',
+      'portwatch:chokepoints:ref:v1',
+      'portwatch:disruptions:active:v1',
+      'energy:crisis-policies:v1',
+      'energy:intelligence:feed:v1',
     ],
     _seedMetaKey: 'seed-meta:trade:customs-revenue',
     _maxStaleMin: 2880,
@@ -321,6 +278,24 @@ const TOOL_REGISTRY: ToolDef[] = [
     _cacheKeys: ['intelligence:social:reddit:v1'],
     _seedMetaKey: 'seed-meta:intelligence:social-reddit',
     _maxStaleMin: 30,
+  },
+
+  // -------------------------------------------------------------------------
+  // Resilience recovery — cache read (IMF WEO-derived resilience indicators)
+  // -------------------------------------------------------------------------
+  {
+    name: 'get_resilience_recovery',
+    description: 'IMF WEO-derived resilience and recovery indicators: fiscal space (revenue vs. spending headroom), reserve adequacy (external reserves vs. imports), external debt sustainability, import concentration (HHI), and strategic fuel stock levels. Covers 200+ countries with monthly/quarterly cadence.',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+    _cacheKeys: [
+      'resilience:recovery:fiscal-space:v1',
+      'resilience:recovery:reserve-adequacy:v1',
+      'resilience:recovery:external-debt:v1',
+      'resilience:recovery:import-hhi:v1',
+      'resilience:recovery:fuel-stocks:v1',
+    ],
+    _seedMetaKey: 'seed-meta:resilience:recovery:fiscal-space',
+    _maxStaleMin: 43200,
   },
 
   // -------------------------------------------------------------------------
