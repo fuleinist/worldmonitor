@@ -181,6 +181,9 @@ function validateQuietHoursArgs(args: {
   if (args.quietHoursEnd !== undefined && (args.quietHoursEnd < 0 || args.quietHoursEnd > 23 || !Number.isInteger(args.quietHoursEnd))) {
     throw new ConvexError("quietHoursEnd must be an integer 0–23");
   }
+  if (args.quietHoursStart !== undefined && args.quietHoursEnd !== undefined && args.quietHoursStart === args.quietHoursEnd) {
+    throw new ConvexError("quietHoursStart and quietHoursEnd cannot be equal — set the same value for both means quiet hours are always active; use the enabled flag instead");
+  }
   if (args.quietHoursTimezone !== undefined) {
     try {
       Intl.DateTimeFormat(undefined, { timeZone: args.quietHoursTimezone });

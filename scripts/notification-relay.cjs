@@ -114,7 +114,34 @@ function isPrivateIP(ip) {
 
 // ── Quiet hours ───────────────────────────────────────────────────────────────
 
-const { toLocalHour, isInQuietHours } = require('./lib/quiet-hours.cjs');
+function toLocalHour(nowMs, timezone) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      hour: 'numeric',
+      hour12: false,
+    }).formatToParts(new Date(nowMs));
+    const h = parts.find(p => p.type === 'hour');
+    return h ? parseInt(h.value, 10) : -1;
+  } catch {
+    return -1;
+  }
+}
+
+function isInQuietHours(rule) {
+  if (!rule.quietHoursEnabled) return false;
+  const start = rule.quietHoursStart ?? 22;
+  const end = rule.quietHoursEnd ?? 7;
+  // start === end means quiet hours are not meaningful — treat as disabled
+  if (start === end) return false;
+  const tz = rule.quietHoursTimezone ?? 'UTC';
+  const localHour = toLocalHour(Date.now(), tz);
+  if (localHour === -1) return false;
+  // spans midnight when start > end (e.g. 23:00-07:00)
+  return start < end
+    ? localHour >= start && localHour < end
+    : localHour >= start || localHour < end;
+}
 
 // Returns 'deliver' | 'suppress' | 'hold'
 function resolveQuietAction(rule, severity) {
@@ -256,7 +283,7 @@ async function processFlushQuietHeld(event) {
 
 // ── Delivery: Telegram ────────────────────────────────────────────────────────
 
-async function sendTelegram(userId, chatId, text) {
+async function sendTelegram(userId, chatId, text, _retryCount = 0) {
   if (!TELEGRAM_BOT_TOKEN) {
     console.warn('[relay] Telegram: TELEGRAM_BOT_TOKEN not set — skipping');
     return false;
@@ -277,10 +304,14 @@ async function sendTelegram(userId, chatId, text) {
     return false;
   }
   if (res.status === 429) {
+    if (_retryCount >= 1) {
+      console.warn(`[relay] Telegram 429 retry exhausted for ${userId} — giving up`);
+      return false;
+    }
     const body = await res.json().catch(() => ({}));
     const wait = ((body.parameters?.retry_after ?? 5) + 1) * 1000;
     await new Promise(r => setTimeout(r, wait));
-    return sendTelegram(userId, chatId, text); // single retry
+    return sendTelegram(userId, chatId, text, _retryCount + 1); // single retry with counter
   }
   if (res.status === 401) {
     console.error('[relay] Telegram 401 Unauthorized — TELEGRAM_BOT_TOKEN is invalid or belongs to a different bot; correct the Railway env var to restore Telegram delivery');
@@ -445,13 +476,6 @@ async function sendWebhook(userId, webhookEnvelope, event) {
     return false;
   }
 
-  // Envelope version stays at '1'. Payload gained optional `corroborationCount`
-  // on rss_alert (PR #3069) — this is an additive field, backwards-compatible
-  // for consumers that don't enforce `additionalProperties: false`. Bumping
-  // version here would have broken parity with the other webhook producers
-  // (scripts/proactive-intelligence.mjs, scripts/seed-digest-notifications.mjs)
-  // which still emit v1, causing the same endpoint to receive mixed envelope
-  // versions per event type.
   const payload = JSON.stringify({
     version: '1',
     eventType: event.eventType,
@@ -556,62 +580,21 @@ async function processWelcome(event) {
 
 const IMPORTANCE_SCORE_LIVE = process.env.IMPORTANCE_SCORE_LIVE === '1';
 const IMPORTANCE_SCORE_MIN = Number(process.env.IMPORTANCE_SCORE_MIN ?? 40);
-// v2 key: JSON-encoded members, used after the stale-score fix (PR #TBD).
-// The old v1 key (compact string format) is retained by consumers for
-// backward-compat reading but is no longer written. See
-// docs/internal/scoringDiagnostic.md §5 and §9 Step 4.
-const SHADOW_SCORE_LOG_KEY = 'shadow:score-log:v2';
+const SHADOW_SCORE_LOG_KEY = 'shadow:score-log:v1';
 const SHADOW_LOG_TTL = 7 * 24 * 3600; // 7 days
 
 async function shadowLogScore(event) {
   const importanceScore = event.payload?.importanceScore ?? 0;
   if (!UPSTASH_URL || !UPSTASH_TOKEN || importanceScore === 0) return;
   const now = Date.now();
-  const record = {
-    ts: now,
-    importanceScore,
-    severity: event.severity ?? 'high',
-    eventType: event.eventType,
-    title: String(event.payload?.title ?? '').slice(0, 160),
-    source: event.payload?.source ?? '',
-    publishedAt: event.payload?.publishedAt ?? null,
-    corroborationCount: event.payload?.corroborationCount ?? null,
-    variant: event.variant ?? '',
-  };
-  const member = JSON.stringify(record);
+  // Use timestamp as the sorted-set score so entries are time-sortable for analysis.
+  // Member encodes importanceScore + context for review.
+  const member = `${now}:score=${importanceScore}:${event.eventType}:${String(event.payload?.title ?? '').slice(0, 60)}`;
   const cutoff = String(now - SHADOW_LOG_TTL * 1000); // prune entries older than 7 days
-  // One pipelined HTTP request: ZADD + ZREMRANGEBYSCORE prune + 30-day
-  // belt-and-suspenders EXPIRE. Saves ~50% round-trips vs sequential calls
-  // and bounds growth even if writes stop and the rolling prune stalls.
   try {
-    const res = await fetch(`${UPSTASH_URL}/pipeline`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${UPSTASH_TOKEN}`,
-        'Content-Type': 'application/json',
-        'User-Agent': 'worldmonitor-relay/1.0',
-      },
-      body: JSON.stringify([
-        ['ZADD', SHADOW_SCORE_LOG_KEY, String(now), member],
-        ['ZREMRANGEBYSCORE', SHADOW_SCORE_LOG_KEY, '-inf', cutoff],
-        ['EXPIRE', SHADOW_SCORE_LOG_KEY, '2592000'],
-      ]),
-    });
-    // Surface HTTP failures and per-command errors. Activation depends on v2
-    // filling with clean data; a silent write-failure would leave operators
-    // staring at an empty ZSET with no signal.
-    if (!res.ok) {
-      console.warn(`[relay] shadow-log pipeline HTTP ${res.status}`);
-      return;
-    }
-    const body = await res.json().catch(() => null);
-    if (Array.isArray(body)) {
-      const failures = body.map((cmd, i) => (cmd?.error ? `cmd[${i}] ${cmd.error}` : null)).filter(Boolean);
-      if (failures.length > 0) console.warn(`[relay] shadow-log pipeline partial failure: ${failures.join('; ')}`);
-    }
-  } catch (err) {
-    console.warn(`[relay] shadow-log pipeline threw: ${err?.message ?? err}`);
-  }
+    await upstashRest('ZADD', SHADOW_SCORE_LOG_KEY, String(now), member);
+    await upstashRest('ZREMRANGEBYSCORE', SHADOW_SCORE_LOG_KEY, '-inf', cutoff);
+  } catch {}
 }
 
 // ── AI impact analysis ───────────────────────────────────────────────────────
@@ -682,10 +665,8 @@ async function processEvent(event) {
   if (event.eventType === 'flush_quiet_held') { await processFlushQuietHeld(event); return; }
   console.log(`[relay] Processing event: ${event.eventType} (${event.severity ?? 'high'})`);
 
-  // Shadow log importanceScore for comparison. Gate at caller: only rss_alert
-  // events carry importanceScore; for everything else shadowLogScore would
-  // short-circuit, but we still pay the promise/microtask cost unless gated here.
-  if (event.eventType === 'rss_alert') shadowLogScore(event).catch(() => {});
+  // Shadow log importanceScore for comparison (always runs when score is present)
+  shadowLogScore(event).catch(() => {});
 
   // Score gate — only for rss_alert; other event types (oref_siren, conflict_escalation,
   // notam_closure, etc.) never attach importanceScore so they must never be gated here.
