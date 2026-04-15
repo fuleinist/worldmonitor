@@ -525,7 +525,7 @@ function matchesSensitivity(ruleSensitivity, eventSeverity) {
  *
  * Shadow mode (default, flag OFF): computes score decision but always falls
  * back to the legacy result so real notifications are unaffected. Logs to
- * shadow:score-log:v1 for tuning.
+ * shadow:score-log:v2 for tuning.
  */
 function shouldNotify(rule, event) {
   const passesLegacy = matchesSensitivity(rule.sensitivity, event.severity ?? 'high');
@@ -562,7 +562,9 @@ async function processWelcome(event) {
       signal: AbortSignal.timeout(10000),
     });
     if (chRes.ok) channels = (await chRes.json()) ?? [];
-  } catch {}
+  } catch (err) {
+    console.warn(`[relay] shadow-log threw: ${err?.message ?? err}`);
+  }
 
   const ch = channels.find(c => c.channelType === channelType && c.verified);
   if (!ch) return;
@@ -580,7 +582,7 @@ async function processWelcome(event) {
 
 const IMPORTANCE_SCORE_LIVE = process.env.IMPORTANCE_SCORE_LIVE === '1';
 const IMPORTANCE_SCORE_MIN = Number(process.env.IMPORTANCE_SCORE_MIN ?? 40);
-const SHADOW_SCORE_LOG_KEY = 'shadow:score-log:v1';
+const SHADOW_SCORE_LOG_KEY = 'shadow:score-log:v2';
 const SHADOW_LOG_TTL = 7 * 24 * 3600; // 7 days
 
 async function shadowLogScore(event) {
@@ -594,7 +596,10 @@ async function shadowLogScore(event) {
   try {
     await upstashRest('ZADD', SHADOW_SCORE_LOG_KEY, String(now), member);
     await upstashRest('ZREMRANGEBYSCORE', SHADOW_SCORE_LOG_KEY, '-inf', cutoff);
-  } catch {}
+    await upstashRest('EXPIRE', SHADOW_SCORE_LOG_KEY, '2592000');
+  } catch (err) {
+    console.warn(`[relay] shadow-log threw: ${err?.message ?? err}`);
+  }
 }
 
 // ── AI impact analysis ───────────────────────────────────────────────────────
