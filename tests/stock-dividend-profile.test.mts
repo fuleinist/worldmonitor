@@ -90,6 +90,8 @@ describe('fetchDividendProfile', () => {
     const currentYear = new Date().getFullYear();
     const divs: Record<string, { amount: number; date: number }> = {};
     // Four fully completed prior calendar years, growing 0.50 -> 0.65.
+    // CAGR is computed only on years < currentYear (see computeDividendCagr),
+    // so the prior-year block is the sole source of CAGR signal.
     const startYear = currentYear - 4;
     for (let yearIndex = 0; yearIndex < 4; yearIndex++) {
       const year = startYear + yearIndex;
@@ -164,6 +166,77 @@ describe('fetchDividendProfile', () => {
       return new Response(JSON.stringify(makeDividendChartPayload(divs)), { status: 200 });
     }) as typeof fetch;
     const profile = await fetchDividendProfile('EU', 50);
+    assert.equal(profile.dividendFrequency, 'Annual');
+  });
+
+  it('emits empty frequency when the dividend program has been suspended', async () => {
+    // 3 years of quarterly history, then silence for the last 18 months.
+    // dividendYield and trailingAnnualDividendRate are both 0; emitting
+    // 'Quarterly' from the historical median gap would contradict them.
+    const now = Math.floor(Date.now() / 1000);
+    const quarterSec = Math.floor((365.25 / 4) * 24 * 3600);
+    const silenceSec = 18 * 30 * 24 * 3600;
+    const divs: Record<string, { amount: number; date: number }> = {};
+    for (let q = 0; q < 12; q++) {
+      const ts = now - silenceSec - q * quarterSec;
+      divs[String(ts)] = { amount: 0.50, date: ts };
+    }
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify(makeDividendChartPayload(divs)), { status: 200 });
+    }) as typeof fetch;
+    const profile = await fetchDividendProfile('SUSP', 100);
+    assert.equal(profile.dividendYield, 0);
+    assert.equal(profile.trailingAnnualDividendRate, 0);
+    assert.equal(profile.dividendFrequency, '');
+  });
+
+  it('detects a recent monthly → quarterly cadence change', async () => {
+    // 12 monthly payments in year -2..-1 (all outside trailing 12 months)
+    // plus 4 quarterly payments inside the trailing year. A 2-year median
+    // gap is ~30d (Monthly dominates the history), but current cadence
+    // is clearly quarterly. The classifier must look at trailing-year
+    // gaps only when there are enough of them.
+    const now = Math.floor(Date.now() / 1000);
+    const day = 24 * 3600;
+    const divs: Record<string, { amount: number; date: number }> = {};
+    // Monthly leg: 12 payments from month -24 to month -13.
+    for (let m = 13; m <= 24; m++) {
+      const ts = now - m * 30 * day;
+      divs[String(ts)] = { amount: 0.10, date: ts };
+    }
+    // Quarterly leg: 4 payments in the last year at ~ -30, -120, -210, -300 days.
+    for (let q = 0; q < 4; q++) {
+      const ts = now - (30 + q * 90) * day;
+      divs[String(ts)] = { amount: 0.30, date: ts };
+    }
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify(makeDividendChartPayload(divs)), { status: 200 });
+    }) as typeof fetch;
+    const profile = await fetchDividendProfile('SHIFT', 100);
+    assert.equal(profile.dividendFrequency, 'Quarterly');
+  });
+
+  it('detects a recent quarterly → annual cadence change', async () => {
+    // 3 years of quarterly history (12 entries, ~91d gap) followed by
+    // a single annual payment in the last year. Whole-series median
+    // would still report ~91d (Quarterly); the recent-window median
+    // correctly reports ~365d (Annual).
+    const now = Math.floor(Date.now() / 1000);
+    const quarterSec = Math.floor((365.25 / 4) * 24 * 3600);
+    const divs: Record<string, { amount: number; date: number }> = {};
+    // Historical quarterly payments, 2..5 years ago (all ≥ 1 year ago).
+    for (let q = 0; q < 12; q++) {
+      const ts = now - (365.25 * 24 * 3600) - q * quarterSec;
+      divs[String(ts)] = { amount: 0.50, date: Math.floor(ts) };
+    }
+    // One payment inside the trailing year at roughly T-60d.
+    const recentTs = now - 60 * 24 * 3600;
+    divs[String(recentTs)] = { amount: 0.50, date: recentTs };
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify(makeDividendChartPayload(divs)), { status: 200 });
+    }) as typeof fetch;
+    const profile = await fetchDividendProfile('SLOW', 100);
+    // Exactly one payment in trailing 12 months → paymentsPerYear ≈ 1 → Annual.
     assert.equal(profile.dividendFrequency, 'Annual');
   });
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { loadEnvFile, CHROME_UA, runSeed, sleep } from './_seed-utils.mjs';
+import { unwrapEnvelope } from './_seed-envelope-source.mjs';
 loadEnvFile(import.meta.url);
 
 const BREADTH_KEY = 'market:breadth-history:v1';
@@ -49,7 +50,7 @@ async function readExistingHistory() {
     });
     if (!resp.ok) return null;
     const { result } = await resp.json();
-    return result ? JSON.parse(result) : null;
+    return result ? unwrapEnvelope(JSON.parse(result)).data : null;
   } catch {
     return null;
   }
@@ -118,9 +119,18 @@ function validate(data) {
   );
 }
 
+export function declareRecords(data) {
+  return Array.isArray(data?.history) ? data.history.length : 0;
+}
+
 runSeed('market', 'breadth-history', BREADTH_KEY, fetchAll, {
   validateFn: validate,
   ttlSeconds: BREADTH_TTL,
+
+  declareRecords,
+  schemaVersion: 1,
+  maxStaleMin: 2880,
+  sourceVersion: 'market-breadth-v1',
 }).catch((err) => {
   console.error('FATAL:', err.message || err);
   process.exit(1);

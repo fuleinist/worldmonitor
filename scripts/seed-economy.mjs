@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { loadEnvFile, CHROME_UA, runSeed, writeExtraKeyWithMeta, sleep, resolveProxy, resolveProxyForConnect, fredFetchJson, curlFetch, getRedisCredentials } from './_seed-utils.mjs';
+import { unwrapEnvelope } from './_seed-envelope-source.mjs';
 
 loadEnvFile(import.meta.url);
 
@@ -120,7 +121,7 @@ async function fetchGscpiFromRedis() {
     if (!resp.ok) return null;
     const body = /** @type {{ result: string | null }} */ (await resp.json());
     if (!body.result) return null;
-    return extractGscpiObservations(JSON.parse(body.result));
+    return extractGscpiObservations(unwrapEnvelope(JSON.parse(body.result)).data);
   } catch {
     return null;
   }
@@ -887,11 +888,18 @@ function validate(data) {
   return data?.prices?.length > 0;
 }
 
+export function declareRecords(data) {
+  return data?.prices?.length ?? 0;
+}
+
 if (process.argv[1]?.endsWith('seed-economy.mjs')) {
   runSeed('economic', 'energy-prices', KEYS.energyPrices, fetchAll, {
     validateFn: validate,
     ttlSeconds: ENERGY_TTL,
     sourceVersion: 'eia-fred-macro',
+    declareRecords,
+    schemaVersion: 1,
+    maxStaleMin: 150,
   }).catch((err) => {
     const _cause = err.cause ? ` (cause: ${err.cause.message || err.cause.code || err.cause})` : ''; console.error('FATAL:', (err.message || err) + _cause);
     process.exit(1);

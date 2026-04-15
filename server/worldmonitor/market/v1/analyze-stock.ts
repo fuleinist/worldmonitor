@@ -203,6 +203,46 @@ function inferDividendFrequency(paymentsPerYear: number): string {
   return '';
 }
 
+/**
+ * Implied payments-per-year from the median gap between dividends. More
+ * robust than counting payments inside a 365.25-day window: quarterly
+ * payers whose last-year-Q1 payment falls just outside the window (common
+ * after mid-April each year) were misclassified as Semi-annual.
+ *
+ * Scopes gaps to the most recent `windowSec` seconds so a cadence change
+ * (e.g. quarterly → annual) is reflected within one window rather than
+ * being averaged over 5 years of history. Falls back to the full series
+ * when the recent window has fewer than 2 usable entries.
+ */
+function paymentsPerYearFromInterval(
+  sortedEntries: ReadonlyArray<{ date?: number }>,
+  nowSec: number = Math.floor(Date.now() / 1000),
+  windowSec: number = 2 * 365.25 * 24 * 3600,
+): number {
+  if (sortedEntries.length < 2) return 0;
+  const cutoff = nowSec - windowSec;
+  const recent = sortedEntries.filter((e) => typeof e.date === 'number' && e.date >= cutoff);
+  const series = recent.length >= 2 ? recent : sortedEntries;
+  const gaps: number[] = [];
+  for (let i = 1; i < series.length; i++) {
+    const prev = series[i - 1]!.date;
+    const curr = series[i]!.date;
+    if (typeof prev !== 'number' || typeof curr !== 'number') continue;
+    const gapDays = (curr - prev) / (24 * 3600);
+    if (gapDays > 0) gaps.push(gapDays);
+  }
+  if (gaps.length === 0) return 0;
+  gaps.sort((a, b) => a - b);
+  // True median (average of two middles for even-length arrays) — avoids
+  // upper-bias at thresholds when the trailing-year sample is small.
+  const mid = Math.floor(gaps.length / 2);
+  const medianGapDays = gaps.length % 2 === 1
+    ? gaps[mid]!
+    : (gaps[mid - 1]! + gaps[mid]!) / 2;
+  if (medianGapDays <= 0) return 0;
+  return 365.25 / medianGapDays;
+}
+
 function computeDividendCagr(annualTotals: Map<number, number>): number {
   if (annualTotals.size < 2) return 0;
   const years = [...annualTotals.keys()].sort((a, b) => a - b);
@@ -261,7 +301,45 @@ export async function fetchDividendProfile(symbol: string, currentPrice: number)
     const recentDivs = entries.filter((d) => (d.date ?? 0) * 1000 >= oneYearAgo);
     const trailingAnnual = recentDivs.reduce((sum, d) => sum + (d.amount ?? 0), 0);
     const dividendYield = currentPrice > 0 ? (trailingAnnual / currentPrice) * 100 : 0;
-    const paymentsPerYear = recentDivs.length || (entries.length / Math.max(1, annualTotals.size));
+    // Suppress frequency entirely when there is no active dividend program:
+    // no payment in the trailing year means dividendYield/trailingAnnualRate
+    // are both 0, and emitting a 'Quarterly' badge derived from suspended
+    // history would contradict the accompanying zeros in the UI.
+    // Frequency reconciliation:
+    //   recent=0          → program suspended, leave frequency empty
+    //   recent >= 3       → trust interval (robust to calendar-boundary drift)
+    //   recent 1..2       → ambiguous. Use the most recent gap to decide:
+    //                         large recent gap (> 180d) = regime slowdown →
+    //                           trust the count (quarterly → annual shift)
+    //                         small recent gap (<= 180d) = calendar drift →
+    //                           trust the interval (steady quarterly whose
+    //                           prior-year Q1 fell outside the 365d window)
+    let paymentsPerYear = 0;
+    if (recentDivs.length >= 3) {
+      // Use the trailing-year window directly. Scoping the median to
+      // ≥3 trailing-year entries (= 2+ gaps) reflects the CURRENT cadence,
+      // so regime changes like monthly → quarterly (whose 2-year median
+      // would still skew to monthly from prior-year history) are caught.
+      const byInterval = paymentsPerYearFromInterval(recentDivs);
+      paymentsPerYear = byInterval > 0
+        ? byInterval
+        : (recentDivs.length || (entries.length / Math.max(1, annualTotals.size)));
+    } else if (recentDivs.length > 0) {
+      // 1..2 recent payments: reach into the 2-year history to decide
+      // between calendar drift and regime slowdown. Most-recent gap
+      // > 180d means a real slowdown → trust the count.
+      const lastTwo = entries.slice(-2);
+      const mostRecentGapDays =
+        lastTwo.length === 2
+          ? ((lastTwo[1]!.date ?? 0) - (lastTwo[0]!.date ?? 0)) / (24 * 3600)
+          : Number.POSITIVE_INFINITY;
+      if (mostRecentGapDays > 180) {
+        paymentsPerYear = recentDivs.length;
+      } else {
+        const byInterval = paymentsPerYearFromInterval(entries);
+        paymentsPerYear = byInterval > 0 ? byInterval : recentDivs.length;
+      }
+    }
 
     const latestEntry = entries[entries.length - 1]!;
     const exDividendDate = (latestEntry.date ?? 0) * 1000;

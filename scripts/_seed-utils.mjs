@@ -6,6 +6,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
+import { buildEnvelope, unwrapEnvelope } from './_seed-envelope-source.mjs';
+import { resolveRecordCount } from './_seed-contract.mjs';
+
 const CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
 const MAX_PAYLOAD_BYTES = 5 * 1024 * 1024; // 5MB per key
 
@@ -101,7 +104,12 @@ async function redisGet(url, token, key) {
   });
   if (!resp.ok) return null;
   const data = await resp.json();
-  return data.result ? JSON.parse(data.result) : null;
+  if (!data.result) return null;
+  // Envelope-aware: returns inner `data` for seeded keys written in contract
+  // mode, passes through legacy (bare-shape) values unchanged. Fixes WoW/cross-
+  // seed reads that were silently getting `{_seed, data}` after PR 2a enveloped
+  // the writer side of 91 canonical keys.
+  return unwrapEnvelope(JSON.parse(data.result)).data;
 }
 
 async function redisSet(url, token, key, value, ttlSeconds) {
@@ -159,16 +167,10 @@ export async function releaseLock(domain, runId) {
   }
 }
 
-export async function atomicPublish(canonicalKey, data, validateFn, ttlSeconds) {
+export async function atomicPublish(canonicalKey, data, validateFn, ttlSeconds, options = {}) {
   const { url, token } = getRedisCredentials();
   const runId = String(Date.now());
   const stagingKey = `${canonicalKey}:staging:${runId}`;
-
-  const payload = JSON.stringify(data);
-  const payloadBytes = Buffer.byteLength(payload, 'utf8');
-  if (payloadBytes > MAX_PAYLOAD_BYTES) {
-    throw new Error(`Payload too large: ${(payloadBytes / 1024 / 1024).toFixed(1)}MB > 5MB limit`);
-  }
 
   if (validateFn) {
     const valid = validateFn(data);
@@ -177,8 +179,22 @@ export async function atomicPublish(canonicalKey, data, validateFn, ttlSeconds) 
     }
   }
 
+  // When the seeder opts into the contract (options.envelopeMeta provided), wrap
+  // the payload in the seed envelope before publishing so the data key and its
+  // freshness metadata share one lifecycle. Legacy seeders pass no envelopeMeta
+  // and publish bare data, preserving pre-contract behavior. seed-meta:* keys
+  // are always kept bare (shouldEnvelopeKey invariant).
+  const payloadValue = options.envelopeMeta && shouldEnvelopeKey(canonicalKey)
+    ? buildEnvelope({ ...options.envelopeMeta, data })
+    : data;
+  const payload = JSON.stringify(payloadValue);
+  const payloadBytes = Buffer.byteLength(payload, 'utf8');
+  if (payloadBytes > MAX_PAYLOAD_BYTES) {
+    throw new Error(`Payload too large: ${(payloadBytes / 1024 / 1024).toFixed(1)}MB > 5MB limit`);
+  }
+
   // Write to staging key
-  await redisSet(url, token, stagingKey, data, 300); // 5 min staging TTL
+  await redisSet(url, token, stagingKey, payloadValue, 300); // 5 min staging TTL
 
   // Overwrite canonical key
   if (ttlSeconds) {
@@ -237,15 +253,43 @@ export function logSeedResult(domain, count, durationMs, extra = {}) {
   }));
 }
 
-export async function verifySeedKey(key) {
+/**
+ * Shared envelope-aware reader for cross-seed consumers (e.g. seed-forecasts
+ * reading ~40 migrated input keys, seed-chokepoint-flows reading portwatch,
+ * seed-thermal-escalation reading wildfire:fires). Returns the inner `data`
+ * payload for contract-mode writes; passes legacy bare-shape values through
+ * unchanged. Callers MUST NOT parse the envelope themselves.
+ */
+export async function readCanonicalValue(key) {
   const { url, token } = getRedisCredentials();
-  const data = await redisGet(url, token, key);
-  return data;
+  return redisGet(url, token, key);
 }
 
-export async function writeExtraKey(key, data, ttl) {
+export async function verifySeedKey(key) {
+  // redisGet() now unwraps envelopes internally, so callers that read migrated
+  // canonical keys (e.g. seed-climate-anomalies reading climate:zone-normals:v1,
+  // seed-thermal-escalation reading wildfire:fires:v1) see bare legacy-shape
+  // payloads regardless of whether the writer has migrated to contract mode.
   const { url, token } = getRedisCredentials();
-  const payload = JSON.stringify(data);
+  return redisGet(url, token, key);
+}
+
+/**
+ * Invariant: `seed-meta:*` keys MUST be bare-shape `{fetchedAt, recordCount, ...}`.
+ * Health + bundle runner + every legacy reader parses them as top-level.
+ * Enveloping them turns every downstream read into `{_seed, data}` which breaks
+ * the whole freshness-registry flow. Enforced at the helper boundary so future
+ * callers can't regress this by passing an envelopeMeta that happens to target
+ * a seed-meta key (seed-iea-oil-stocks' ANALYSIS_META_EXTRA_KEY did exactly that).
+ */
+export function shouldEnvelopeKey(key) {
+  return typeof key === 'string' && !key.startsWith('seed-meta:');
+}
+
+export async function writeExtraKey(key, data, ttl, envelopeMeta) {
+  const { url, token } = getRedisCredentials();
+  const value = envelopeMeta && shouldEnvelopeKey(key) ? buildEnvelope({ ...envelopeMeta, data }) : data;
+  const payload = JSON.stringify(value);
   const resp = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -670,7 +714,11 @@ export async function readSeedSnapshot(canonicalKey) {
     });
     if (!resp.ok) return null;
     const { result } = await resp.json();
-    return result ? JSON.parse(result) : null;
+    if (!result) return null;
+    // Envelope-aware: WoW/prev baselines (bigmac, grocery-basket, fear-greed)
+    // must see bare legacy-shape data whether the last write was pre- or post-
+    // contract-migration. unwrapEnvelope is a no-op on legacy values.
+    return unwrapEnvelope(JSON.parse(result)).data;
   } catch {
     return null;
   }
@@ -734,13 +782,31 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
     extraKeys,
     afterPublish,
     publishTransform,
+    declareRecords,        // new — contract opt-in. When present, runSeed enters
+                           // envelope-dual-write path: writes `{_seed, data}` to
+                           // canonicalKey alongside legacy `seed-meta:*` key.
+    sourceVersion,         // new — required when declareRecords is passed
+    schemaVersion,         // new — required when declareRecords is passed
+    zeroIsValid = false,   // new — when true, recordCount=0 is OK_ZERO, not RETRY
   } = opts;
+  const contractMode = typeof declareRecords === 'function';
+  if (contractMode) {
+    // Soft-warn (PR 2) on other mandatory contract fields; PR 3 hard-aborts.
+    const missing = [];
+    if (typeof sourceVersion !== 'string' || sourceVersion.trim() === '') missing.push('sourceVersion');
+    if (!Number.isInteger(schemaVersion) || schemaVersion < 1) missing.push('schemaVersion');
+    if (typeof opts.maxStaleMin !== 'number') missing.push('maxStaleMin');
+    if (missing.length) {
+      console.warn(`  [seed-contract] ${domain}:${resource} missing fields: ${missing.join(', ')} — required in PR 3`);
+    }
+  }
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const startMs = Date.now();
 
   console.log(`=== ${domain}:${resource} Seed ===`);
   console.log(`  Run ID:  ${runId}`);
   console.log(`  Key:     ${canonicalKey}`);
+  if (contractMode) console.log(`  Mode:    contract (envelope dual-write)`);
 
   // Acquire lock
   const lockResult = await acquireLockSafely(`${domain}:${resource}`, runId, lockTtlMs, {
@@ -776,7 +842,53 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
   // Phase 2: Publish to Redis (rethrow on failure — data was fetched but not stored)
   try {
     const publishData = publishTransform ? publishTransform(data) : data;
-    const publishResult = await atomicPublish(canonicalKey, publishData, validateFn, ttlSeconds);
+
+    // In contract mode, resolve recordCount from declareRecords BEFORE publish so
+    // the envelope carries the correct state. RETRY-on-empty paths skip the
+    // publish entirely (leaving the previous envelope in place).
+    let contractState = null;   // 'OK' | 'OK_ZERO' | 'RETRY'
+    let contractRecordCount = null;
+    let envelopeMeta = null;
+    if (contractMode) {
+      try {
+        contractRecordCount = resolveRecordCount(declareRecords, publishData);
+      } catch (err) {
+        // Contract violation — declareRecords returned non-int / threw. HARD FAIL.
+        await releaseLock(`${domain}:${resource}`, runId);
+        console.error(`  CONTRACT VIOLATION: ${err.message || err}`);
+        process.exit(1);
+      }
+      if (contractRecordCount > 0) {
+        contractState = 'OK';
+      } else if (zeroIsValid) {
+        contractState = 'OK_ZERO';
+      } else {
+        contractState = 'RETRY';
+      }
+      if (contractState !== 'RETRY') {
+        envelopeMeta = {
+          fetchedAt: Date.now(),
+          recordCount: contractRecordCount,
+          sourceVersion: sourceVersion || '',
+          schemaVersion: schemaVersion || 1,
+          state: contractState,
+        };
+      }
+    }
+
+    // Contract RETRY on empty (no zeroIsValid) — skip publish, extend TTL, exit 0.
+    if (contractState === 'RETRY') {
+      const durationMs = Date.now() - startMs;
+      const keys = [canonicalKey, `seed-meta:${domain}:${resource}`];
+      if (extraKeys) keys.push(...extraKeys.map(ek => ek.key));
+      await extendExistingTtl(keys, ttlSeconds || 600);
+      console.log(`  RETRY: declareRecords returned 0 (zeroIsValid=false) — envelope unchanged, TTL extended, bundle will retry next cycle`);
+      console.log(`\n=== Done (${Math.round(durationMs)}ms, RETRY) ===`);
+      await releaseLock(`${domain}:${resource}`, runId);
+      process.exit(0);
+    }
+
+    const publishResult = await atomicPublish(canonicalKey, publishData, validateFn, ttlSeconds, { envelopeMeta });
     if (publishResult.skipped) {
       const durationMs = Date.now() - startMs;
       const keys = [canonicalKey, `seed-meta:${domain}:${resource}`];
@@ -808,17 +920,41 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
     const topicArticleCount = Array.isArray(data?.topics)
       ? data.topics.reduce((n, t) => n + (t?.articles?.length || t?.events?.length || 0), 0)
       : undefined;
-    const recordCount = computeRecordCount({
-      opts, data, payloadBytes, topicArticleCount,
-      onPhantomFallback: () => console.warn(
-        `  [recordCount] auto-detect did not match a known shape (payloadBytes=${payloadBytes}); falling back to 1. Add opts.recordCount to ${domain}:${resource} for accurate health metrics.`
-      ),
-    });
+    const recordCount = contractMode
+      ? contractRecordCount
+      : computeRecordCount({
+          opts, data, payloadBytes, topicArticleCount,
+          onPhantomFallback: () => console.warn(
+            `  [recordCount] auto-detect did not match a known shape (payloadBytes=${payloadBytes}); falling back to 1. Add opts.recordCount to ${domain}:${resource} for accurate health metrics.`
+          ),
+        });
 
-    // Write extra keys (e.g., bootstrap hydration keys)
+    // Write extra keys (e.g., bootstrap hydration keys). In contract mode each
+    // extra key gets its own envelope; declareRecords may be per-key or reuse
+    // the canonical one.
     if (extraKeys) {
       for (const ek of extraKeys) {
-        await writeExtraKey(ek.key, ek.transform ? ek.transform(data) : data, ek.ttl || ttlSeconds);
+        const ekData = ek.transform ? ek.transform(data) : data;
+        let ekEnvelope = null;
+        if (contractMode) {
+          const ekDeclare = typeof ek.declareRecords === 'function' ? ek.declareRecords : declareRecords;
+          let ekCount;
+          try {
+            ekCount = resolveRecordCount(ekDeclare, ekData);
+          } catch (err) {
+            await releaseLock(`${domain}:${resource}`, runId);
+            console.error(`  CONTRACT VIOLATION on extraKey ${ek.key}: ${err.message || err}`);
+            process.exit(1);
+          }
+          ekEnvelope = {
+            fetchedAt: envelopeMeta.fetchedAt,
+            recordCount: ekCount,
+            sourceVersion: sourceVersion || '',
+            schemaVersion: schemaVersion || 1,
+            state: ekCount > 0 ? 'OK' : (zeroIsValid ? 'OK_ZERO' : 'OK'),
+          };
+        }
+        await writeExtraKey(ek.key, ekData, ek.ttl || ttlSeconds, ekEnvelope);
       }
     }
 
@@ -829,7 +965,7 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
     const meta = await writeFreshnessMetadata(domain, resource, recordCount, opts.sourceVersion, ttlSeconds);
 
     const durationMs = Date.now() - startMs;
-    logSeedResult(domain, recordCount, durationMs, { payloadBytes });
+    logSeedResult(domain, recordCount, durationMs, { payloadBytes, contractMode, state: contractState || 'LEGACY' });
 
     // Verify (best-effort: write already succeeded, don't fail the job on transient read issues)
     let verified = false;

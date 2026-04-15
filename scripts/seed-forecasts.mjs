@@ -5,6 +5,7 @@
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { loadEnvFile, runSeed, CHROME_UA, withRetry } from './_seed-utils.mjs';
+import { unwrapEnvelope } from './_seed-envelope-source.mjs';
 import { tagRegions } from './_prediction-scoring.mjs';
 import { resolveR2StorageConfig, putR2JsonObject, getR2JsonObject } from './_r2-storage.mjs';
 import { extractFirstJsonObject, extractFirstJsonArray, cleanJsonText } from './_llm-json.mjs';
@@ -616,7 +617,7 @@ async function redisGet(url, token, key) {
   if (!resp.ok) return null;
   const data = await resp.json();
   if (!data?.result) return null;
-  try { return JSON.parse(data.result); } catch { return null; }
+  try { return unwrapEnvelope(JSON.parse(data.result)).data; } catch { return null; }
 }
 
 async function redisDel(url, token, key) {
@@ -731,7 +732,13 @@ async function readInputKeys() {
   }
 
   const parse = (i) => {
-    try { return results[i]?.result ? JSON.parse(results[i].result) : null; } catch { return null; }
+    try {
+      const raw = results[i]?.result;
+      if (!raw) return null;
+      // Envelope-aware: pipeline batch reads must strip _seed for contract-mode
+      // writers. unwrapEnvelope is a no-op on legacy bare-shape values.
+      return unwrapEnvelope(JSON.parse(raw)).data;
+    } catch { return null; }
   };
   const parsedByKey = Object.fromEntries(keys.map((key, index) => [key, parse(index)]));
   const fredSeries = Object.fromEntries(
@@ -16014,6 +16021,10 @@ async function buildAndSeedMarketImplications(inputs) {
   console.log(`  [MarketImplications] Published ${cards.length} cards to ${MARKET_IMPLICATIONS_KEY} (${Math.round(durationMs)}ms, model=${result.model || 'unknown'})`);
 }
 
+export function declareRecords(data) {
+  return Array.isArray(data?.predictions) ? data.predictions.length : 0;
+}
+
 if (_isDirectRun) {
   const refreshRequest = await readForecastRefreshRequest();
   const triggerContext = buildForecastTriggerContext(refreshRequest);
@@ -16029,6 +16040,9 @@ if (_isDirectRun) {
     ttlSeconds: TTL_SECONDS,
     lockTtlMs: 180_000,
     validateFn: (data) => Array.isArray(data?.predictions) && data.predictions.length > 0,
+    declareRecords,
+    schemaVersion: 1,
+    maxStaleMin: 90,
     publishTransform: buildPublishedSeedPayload,
     afterPublish: async (data, meta) => {
       if (triggerContext.triggerRequest) {
@@ -16130,6 +16144,7 @@ if (_isDirectRun) {
           predictions: data.predictions.map(buildPriorForecastSnapshot),
         }),
         ttl: 7200,
+        declareRecords,
       },
     ],
   });
