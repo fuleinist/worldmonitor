@@ -277,11 +277,11 @@ export async function listMilitaryFlights(
         markNoCacheResponse(ctx.request);
         return { flights: [], clusters: [], pagination: undefined };
       }
-      lastStaleAttempt = now;
       const staleFlights = await fetchStaleFallback();
       if (staleFlights && staleFlights.length > 0) {
         return { flights: filterFlightsToBounds(staleFlights, requestBounds), clusters: [], pagination: undefined };
       }
+      lastStaleAttempt = now; // only negative-cache when stale came back empty
       markNoCacheResponse(ctx.request);
       return { flights: [], clusters: [], pagination: undefined };
     }
