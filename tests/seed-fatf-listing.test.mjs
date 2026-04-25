@@ -16,6 +16,7 @@ import {
   extractListedCountries,
   extractPublicationDate,
   validate,
+  fetchViaWayback,
 } from '../scripts/seed-fatf-listing.mjs';
 
 describe('findPublicationLink — entry-page anchor scan', () => {
@@ -192,5 +193,167 @@ describe('validate', () => {
     const listings = { KP: 'black' };
     for (let i = 0; i < 14; i++) listings[`X${i.toString().padStart(2, '0')}`] = 'gray';
     assert.equal(validate({ listings }), true);
+  });
+});
+
+// ── fetchViaWayback — Cloudflare-bypass fallback ─────────────────────────
+
+describe('fetchViaWayback — Cloudflare-bypass via Wayback Machine', () => {
+  const FATF_URL = 'https://www.fatf-gafi.org/en/countries/black-and-grey-lists.html';
+  // CDX response shape: [headerRow, ...snapshotRows]. Each snapshot row
+  // is [urlkey, timestamp, original, mimetype, statuscode, digest, length].
+  // Ordered timestamp-ascending — last row is most recent.
+  function cdxResponse(...timestamps) {
+    return {
+      ok: true,
+      json: async () => [
+        ['urlkey', 'timestamp', 'original', 'mimetype', 'statuscode', 'digest', 'length'],
+        ...timestamps.map((ts) => [
+          'org,fatf-gafi)/en/countries/black-and-grey-lists.html',
+          ts,
+          FATF_URL,
+          'text/html',
+          '200',
+          'DIGEST',
+          '18000',
+        ]),
+      ],
+    };
+  }
+
+  it('happy path: queries CDX for latest 200 snapshot, fetches it via id_ modifier, returns HTML', async () => {
+    const calls = [];
+    const fetchFn = async (url) => {
+      calls.push(url);
+      if (url.startsWith('https://web.archive.org/cdx/')) {
+        return cdxResponse('20260224230921', '20260331230909', '20260403144947');
+      }
+      // Snapshot fetch — must use the LATEST timestamp + id_ modifier
+      assert.match(url, /web\/20260403144947id_\//, 'must request the latest CDX timestamp with id_ modifier');
+      return { ok: true, text: async () => '<html><body><h2>Black & grey lists</h2></body></html>' };
+    };
+    const html = await fetchViaWayback(FATF_URL, { fetchFn });
+    assert.match(html, /Black & grey lists/);
+    assert.equal(calls.length, 2, 'one CDX call + one snapshot call');
+  });
+
+  it('CDX URL is built with statuscode:200 filter, a from-date, AND limit=-1 (negative limit returns the most-recent capture)', async () => {
+    let cdxUrl;
+    const fetchFn = async (url) => {
+      if (url.startsWith('https://web.archive.org/cdx/')) {
+        cdxUrl = url;
+        return cdxResponse('20260403144947');
+      }
+      return { ok: true, text: async () => '<html></html>' };
+    };
+    await fetchViaWayback(FATF_URL, { fetchFn, lookbackDays: 90 });
+    assert.match(cdxUrl, /filter=statuscode%3A200|filter=statuscode:200/, 'CDX query must filter to status 200');
+    assert.match(cdxUrl, /from=\d{8}/, 'CDX query must include a from-date floor');
+    assert.match(cdxUrl, /output=json/);
+    // Critical: CDX default ordering is timestamp-ASCENDING. A positive
+    // `limit=N` returns the OLDEST N captures within the window — not the
+    // newest. FATF accumulates well over 20 captures per 180-day window,
+    // so a positive limit would silently serve a stale archived snapshot
+    // even when a newer one exists. `limit=-1` = "last 1 capture" =
+    // most-recent. Pin this so a future cleanup can't regress it.
+    assert.match(cdxUrl, /[?&]limit=-1(&|$)/, 'CDX query MUST use negative limit (limit=-1) to get the most-recent snapshot, not the oldest within the window');
+    assert.doesNotMatch(cdxUrl, /[?&]limit=(?!-)\d+/, 'CDX query must NOT use a positive limit — that returns the oldest captures and serves stale data');
+  });
+
+  it('throws clear error when Wayback has NO status-200 snapshots in window', async () => {
+    const fetchFn = async (url) => {
+      if (url.startsWith('https://web.archive.org/cdx/')) {
+        // Only the header row, no actual snapshots.
+        return { ok: true, json: async () => [['urlkey', 'timestamp', 'original', 'mimetype', 'statuscode', 'digest', 'length']] };
+      }
+      throw new Error('snapshot fetch should not be reached when CDX is empty');
+    };
+    await assert.rejects(
+      fetchViaWayback(FATF_URL, { fetchFn }),
+      /no status-200 snapshots/,
+    );
+  });
+
+  it('throws when CDX itself is unreachable (HTTP 5xx)', async () => {
+    const fetchFn = async () => ({ ok: false, status: 503 });
+    await assert.rejects(
+      fetchViaWayback(FATF_URL, { fetchFn }),
+      /Wayback CDX HTTP 503/,
+    );
+  });
+
+  it('throws when the snapshot itself returns non-200 (e.g. Wayback re-fetched a Cloudflare 403)', async () => {
+    const fetchFn = async (url) => {
+      if (url.startsWith('https://web.archive.org/cdx/')) {
+        return cdxResponse('20260403144947');
+      }
+      return { ok: false, status: 403 };
+    };
+    await assert.rejects(
+      fetchViaWayback(FATF_URL, { fetchFn }),
+      /Wayback snapshot 20260403144947 HTTP 403/,
+    );
+  });
+
+  it('rejects malformed CDX timestamps (defends against CDX schema drift)', async () => {
+    const fetchFn = async (url) => {
+      if (url.startsWith('https://web.archive.org/cdx/')) {
+        return {
+          ok: true,
+          json: async () => [
+            ['urlkey', 'timestamp', 'original', 'mimetype', 'statuscode', 'digest', 'length'],
+            ['org,fatf-gafi)/x', 'NOT-A-TIMESTAMP', FATF_URL, 'text/html', '200', 'D', '1'],
+          ],
+        };
+      }
+      throw new Error('snapshot fetch should not run with malformed timestamp');
+    };
+    await assert.rejects(
+      fetchViaWayback(FATF_URL, { fetchFn }),
+      /malformed timestamp/,
+    );
+  });
+
+  it('sends a User-Agent header on BOTH the CDX query and the snapshot fetch (AGENTS.md convention)', async () => {
+    // AGENTS.md mandates "Always include `User-Agent` header in
+    // server-side fetch calls". The direct FATF fetch sends CHROME_UA;
+    // the Wayback path must match. archive.org doesn't usually block
+    // header-less requests, but house-style consistency is the point —
+    // and a future Wayback rate-limiter could reasonably enforce UA.
+    const seenHeaders = [];
+    const fetchFn = async (url, opts) => {
+      seenHeaders.push({ url, ua: opts?.headers?.['User-Agent'] });
+      if (url.startsWith('https://web.archive.org/cdx/')) {
+        return cdxResponse('20260403144947');
+      }
+      return { ok: true, text: async () => '<html></html>' };
+    };
+    await fetchViaWayback(FATF_URL, { fetchFn });
+    assert.equal(seenHeaders.length, 2, 'expected one CDX + one snapshot fetch');
+    for (const { url, ua } of seenHeaders) {
+      assert.ok(typeof ua === 'string' && ua.length > 0,
+        `User-Agent must be set on ${url} (got: ${ua})`);
+      // Pin that we're not sending some empty/sentinel value — it should
+      // be the real CHROME_UA the rest of the seeder uses.
+      assert.match(ua, /Mozilla\/5\.0/,
+        `User-Agent on ${url} should be the canonical CHROME_UA, not a placeholder; got: ${ua}`);
+    }
+  });
+
+  it('uses id_ modifier (NOT the bare /web/timestamp/url path) — keeps the parser DOM byte-for-byte identical to direct FATF', async () => {
+    // Without `id_`, Wayback prepends a ~3KB toolbar banner and rewrites
+    // every href/src to /web/.../ paths. Both would break the existing
+    // parser. This test pins the modifier so a future "cleanup" can't
+    // silently regress to the broken bare form.
+    let snapshotUrl;
+    const fetchFn = async (url) => {
+      if (url.startsWith('https://web.archive.org/cdx/')) {
+        return cdxResponse('20260403144947');
+      }
+      snapshotUrl = url;
+      return { ok: true, text: async () => '<html></html>' };
+    };
+    await fetchViaWayback(FATF_URL, { fetchFn });
+    assert.match(snapshotUrl, /\/web\/\d{14}id_\//, 'snapshot URL MUST use the id_ modifier');
   });
 });

@@ -51,7 +51,74 @@ function normalizeName(name) {
     .trim();
 }
 
+// Wayback fallback config. FATF plenary publishes 3×/year (Feb / Jun / Oct);
+// 180 days covers >1 plenary cycle so we won't miss the most recent list
+// even if Cloudflare blocked Wayback's own crawler for a few weeks.
+const WAYBACK_CDX_URL = 'https://web.archive.org/cdx/search/cdx';
+const WAYBACK_LOOKBACK_DAYS = 180;
+
+/**
+ * Fetch a URL via Wayback Machine's most recent successful (statuscode:200)
+ * snapshot. Used when both direct and CONNECT-proxy fetches are blocked at
+ * the URL level (e.g. FATF's Cloudflare "Just a moment…" JS challenge —
+ * neither browser headers nor residential proxy IPs pass without JS exec).
+ *
+ * Wayback's `id_` URL modifier returns the captured HTML byte-for-byte
+ * without Wayback's banner injection or href/src rewriting — critical for
+ * keeping the parser working against the same DOM it sees from FATF
+ * directly.
+ *
+ * Tradeoff: 1–3 day staleness vs FATF's live page. For FATF specifically
+ * this is fine because plenary outputs change ~3×/year and the seeder's
+ * bundle interval is 30d; for any caller with a tighter freshness budget,
+ * tune `WAYBACK_LOOKBACK_DAYS` accordingly.
+ *
+ * Test seam: `fetchFn` defaults to global `fetch` so production wiring is
+ * untouched; tests pass a mocked fetch.
+ */
+export async function fetchViaWayback(url, { fetchFn = fetch, lookbackDays = WAYBACK_LOOKBACK_DAYS } = {}) {
+  const fromDate = new Date(Date.now() - lookbackDays * 86_400_000)
+    .toISOString()
+    .slice(0, 10)
+    .replace(/-/g, '');
+  // CDX default sort is timestamp-ASCENDING. With a positive `limit=N` the
+  // server returns the FIRST N captures within the window (i.e. the OLDEST
+  // N), not the newest. FATF accumulates well over 20 captures per 180-day
+  // window, so a positive limit would silently serve a stale snapshot when
+  // a newer one exists. CDX accepts a NEGATIVE `limit` to mean "last N
+  // captures" — `limit=-1` returns just the most-recent snapshot, which
+  // is exactly what we want and also avoids fetching ~20× more rows than
+  // we need.
+  const cdxUrl = `${WAYBACK_CDX_URL}?url=${encodeURIComponent(url)}&filter=statuscode:200&output=json&from=${fromDate}&limit=-1`;
+  const cdxResp = await fetchFn(cdxUrl, {
+    headers: { 'User-Agent': CHROME_UA },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!cdxResp.ok) throw new Error(`Wayback CDX HTTP ${cdxResp.status} for ${url}`);
+  const rows = await cdxResp.json();
+  // CDX returns: [headerRow, snapshotRow]. Each snapshot row =
+  // [urlkey, timestamp, original, mimetype, statuscode, digest, length].
+  // With `limit=-1` we expect exactly one snapshot row.
+  if (!Array.isArray(rows) || rows.length < 2) {
+    throw new Error(`Wayback has no status-200 snapshots for ${url} since ${fromDate}`);
+  }
+  const latest = rows[rows.length - 1];
+  const timestamp = latest[1];
+  if (!/^\d{14}$/.test(timestamp)) {
+    throw new Error(`Wayback CDX returned malformed timestamp "${timestamp}" for ${url}`);
+  }
+  const snapshotUrl = `https://web.archive.org/web/${timestamp}id_/${url}`;
+  const snapResp = await fetchFn(snapshotUrl, {
+    headers: { 'User-Agent': CHROME_UA },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!snapResp.ok) throw new Error(`Wayback snapshot ${timestamp} HTTP ${snapResp.status} for ${url}`);
+  return snapResp.text();
+}
+
 async function fetchHtml(url) {
+  // Tier 1: direct fetch.
+  let directErr;
   try {
     const resp = await fetch(url, {
       headers: { 'User-Agent': CHROME_UA, Accept: 'text/html' },
@@ -59,11 +126,29 @@ async function fetchHtml(url) {
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return await resp.text();
-  } catch (directErr) {
-    if (!_proxyAuth) throw new Error(`FATF fetch ${url}: ${directErr.message}`);
-    console.warn(`  FATF ${url}: direct failed (${directErr.message}), retrying via proxy`);
-    const { buffer } = await httpsProxyFetchRaw(url, _proxyAuth, { accept: 'text/html', timeoutMs: 30_000 });
-    return buffer.toString('utf8');
+  } catch (err) {
+    directErr = err;
+    console.warn(`  FATF ${url}: direct failed (${err.message})`);
+  }
+  // Tier 2: CONNECT proxy (if configured).
+  let proxyErr;
+  if (_proxyAuth) {
+    try {
+      const { buffer } = await httpsProxyFetchRaw(url, _proxyAuth, { accept: 'text/html', timeoutMs: 30_000 });
+      return buffer.toString('utf8');
+    } catch (err) {
+      proxyErr = err;
+      console.warn(`  FATF ${url}: proxy failed (${err.message}), falling back to Wayback`);
+    }
+  } else {
+    console.warn(`  FATF ${url}: no proxy configured, falling back to Wayback`);
+  }
+  // Tier 3: Wayback Machine (bypasses Cloudflare JS challenge).
+  try {
+    return await fetchViaWayback(url);
+  } catch (wbErr) {
+    const proxyMsg = proxyErr ? ` proxy=${proxyErr.message};` : '';
+    throw new Error(`FATF fetch ${url}: direct=${directErr.message};${proxyMsg} wayback=${wbErr.message}`);
   }
 }
 
