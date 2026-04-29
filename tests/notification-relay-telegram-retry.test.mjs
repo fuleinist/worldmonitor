@@ -3,121 +3,160 @@
  * recurse infinitely on sustained 429 responses.
  *
  * Before the fix, the 429 handler called sendTelegram() unconditionally with
- * no retry counter, creating unbounded recursion during sustained rate limiting.
- * This could stack-overflow the Railway relay process.
+ * no retry counter, creating unbounded recursion during sustained rate
+ * limiting. This could stack-overflow the Railway relay process.
  *
- * The fix adds a `_retryCount` parameter (default 0) and bails after one retry.
+ * The fix adds a `_retryCount` parameter (default 0) and bails after one
+ * retry. This test exercises the actual function via a mocked global fetch
+ * and asserts on call count + return value, so it survives source-formatting
+ * changes that don't alter behaviour.
  *
  * Run: node --test tests/notification-relay-telegram-retry.test.mjs
  */
 
-import { describe, it } from 'node:test';
+import { describe, it, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import Module from 'node:module';
+import { createRequire } from 'node:module';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const relaySrc = readFileSync(
-  resolve(__dirname, '..', 'scripts', 'notification-relay.cjs'),
-  'utf-8',
-);
+const require = createRequire(import.meta.url);
 
-function extractSendTelegram(src) {
-  const idx = src.indexOf('async function sendTelegram(');
-  assert.ok(idx !== -1, 'sendTelegram not found in notification-relay.cjs');
-  const openIdx = src.indexOf('{', idx);
-  let depth = 1;
-  let i = openIdx + 1;
-  while (i < src.length && depth > 0) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') depth--;
-    i++;
+// Stub env vars BEFORE requiring the relay module so the top-of-file
+// validation block does not call process.exit(1).
+process.env.UPSTASH_REDIS_REST_URL ??= 'https://stub.upstash.io';
+process.env.UPSTASH_REDIS_REST_TOKEN ??= 'stub-token';
+process.env.CONVEX_URL ??= 'https://stub.convex.cloud';
+process.env.RELAY_SHARED_SECRET ??= 'stub-secret';
+process.env.TELEGRAM_BOT_TOKEN ??= 'stub-bot-token';
+
+// The relay's runtime deps (`resend`, `convex/browser`) live in
+// scripts/package.json and are only installed in the Railway container, so
+// they are not on the resolution path when running tests from the repo root.
+// Stub them at the loader level — `sendTelegram` only uses `fetch`, not these
+// modules, so empty shims are sufficient.
+const originalLoad = Module._load;
+Module._load = function patchedLoad(request, parent, ...rest) {
+  if (request === 'resend') return { Resend: class { constructor() {} } };
+  if (request === 'convex/browser') {
+    return { ConvexHttpClient: class { constructor() {} async query() {} } };
   }
-  return src.slice(idx, i);
+  return originalLoad.call(this, request, parent, ...rest);
+};
+
+let sendTelegram;
+let originalFetch;
+
+before(() => {
+  // The relay only starts its poll loop when require.main === module, so
+  // requiring it from a test is a side-effect-free import.
+  ({ sendTelegram } = require(
+    resolve(__dirname, '..', 'scripts', 'notification-relay.cjs'),
+  ));
+  assert.equal(typeof sendTelegram, 'function', 'sendTelegram export missing');
+});
+
+function makeRes(status, body = {}) {
+  let cancelled = false;
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    json: async () => body,
+    body: { cancel() { cancelled = true; } },
+    get _cancelled() { return cancelled; },
+  };
 }
 
+beforeEach(() => {
+  originalFetch = globalThis.fetch;
+});
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
+
 describe('notification-relay sendTelegram retry discipline', () => {
-  const fn = extractSendTelegram(relaySrc);
-
-  it('has a _retryCount parameter defaulting to 0', () => {
-    assert.match(
-      fn,
-      /async function sendTelegram\s*\(\s*\w+,\s*\w+,\s*\w+,\s*_retryCount\s*=\s*0\s*\)/,
-      'sendTelegram must accept _retryCount = 0 parameter',
-    );
+  it('returns true on first-try 200 (no retry)', async () => {
+    let callCount = 0;
+    globalThis.fetch = async () => {
+      callCount++;
+      return makeRes(200, { ok: true });
+    };
+    const ok = await sendTelegram('user-1', 'chat-1', 'hello');
+    assert.equal(ok, true, 'sendTelegram should return true on 200');
+    assert.equal(callCount, 1, 'fetch should be called exactly once on 200');
   });
 
-  it('bails and returns false when _retryCount >= 1 (no infinite recursion)', () => {
-    // There must be a guard that returns false when retry count is exceeded.
-    // The guard code is: if ((_retryCount ?? 0) >= 1) { console.warn(...); return false; }
-    assert.match(
-      fn,
-      /_retryCount.*?\)\s*>=\s*1/,
-      'sendTelegram must guard against _retryCount >= 1 to prevent infinite recursion',
-    );
+  it('retries once on 429 then succeeds (returns true, fetch called twice)', async () => {
+    const responses = [
+      makeRes(429, { parameters: { retry_after: 0 } }),
+      makeRes(200, { ok: true }),
+    ];
+    let callCount = 0;
+    globalThis.fetch = async () => {
+      callCount++;
+      return responses.shift();
+    };
+    const ok = await sendTelegram('user-1', 'chat-1', 'hello');
+    assert.equal(ok, true, '429 → 200 should return true');
+    assert.equal(callCount, 2, 'fetch should be called exactly twice (initial + 1 retry)');
+  });
 
-    // The guard must return false (not recurse again)
-    assert.ok(
-      /if\s*\([^)]*_retryCount[^)]*\)\s*>=\s*1/.test(fn),
-      'guard if-statement with _retryCount >= 1 check not found',
-    );
-    assert.ok(
-      fn.includes('return false'),
-      'guard must return false when retry limit is exceeded',
-    );
+  it('bails after exactly one retry on sustained 429 (no infinite recursion)', async () => {
+    let callCount = 0;
+    globalThis.fetch = async () => {
+      callCount++;
+      return makeRes(429, { parameters: { retry_after: 0 } });
+    };
+    const ok = await sendTelegram('user-1', 'chat-1', 'hello');
+    assert.equal(ok, false, 'sustained 429 should return false');
+    assert.equal(callCount, 2, 'fetch must be called exactly 2 times (initial + 1 retry, then bail)');
+  });
 
-    // The return false must be INSIDE the guard if-block, not somewhere else
-    const guardBlockIdx = fn.indexOf('if ((_retryCount ?? 0) >= 1)');
-    assert.ok(guardBlockIdx !== -1, 'guard block not found');
-    const afterGuard = fn.slice(guardBlockIdx);
-    const returnIdx = afterGuard.indexOf('return false');
+  it('cancels the response body on the bail path (no socket leak)', async () => {
+    const responses = [];
+    globalThis.fetch = async () => {
+      const res = makeRes(429, { parameters: { retry_after: 0 } });
+      responses.push(res);
+      return res;
+    };
+    await sendTelegram('user-1', 'chat-1', 'hello');
+    // The 2nd 429 response is the one that hits the bail branch — its
+    // body must be cancelled to free the underlying socket.
+    assert.equal(responses.length, 2, 'expected 2 responses (initial + 1 retry)');
+    assert.equal(responses[1]._cancelled, true, 'bail-path response body must be cancelled');
+  });
 
-    // Find the matching closing brace of the guard block (not the first '}')
-    const openBraceIdx = afterGuard.indexOf('{');
-    let braceDepth = 0;
-    let closingBraceIdx = -1;
-    for (let j = openBraceIdx; j < afterGuard.length; j++) {
-      if (afterGuard[j] === '{') braceDepth++;
-      else if (afterGuard[j] === '}') {
-        braceDepth--;
-        if (braceDepth === 0) { closingBraceIdx = j; break; }
+  it('returns false on 403 without retry', async () => {
+    // 403 triggers deactivateChannel() which itself calls fetch against
+    // CONVEX_SITE_URL. We only care about Telegram-API calls here, so
+    // count requests by hostname.
+    let telegramCalls = 0;
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('api.telegram.org')) {
+        telegramCalls++;
+        return makeRes(403, { description: 'Forbidden: bot was blocked by the user' });
       }
-    }
-
-    assert.ok(
-      returnIdx !== -1 && returnIdx < closingBraceIdx,
-      'return false must appear before the closing brace of the guard block',
-    );
+      // deactivateChannel hits Convex — return a benign 200 so the call
+      // doesn't throw and pollute this assertion.
+      return makeRes(200, { ok: true });
+    };
+    const ok = await sendTelegram('user-1', 'chat-1', 'hello');
+    assert.equal(ok, false, '403 should return false');
+    assert.equal(telegramCalls, 1, '403 must not retry the Telegram call');
   });
 
-  it('passes incremented retry count on the recursive 429 call', () => {
-    // The recursive call inside the 429 block must pass an incremented retry count.
-    // Since regex can't easily match nested parens, we verify:
-    // 1. sendTelegram is called recursively (the only call site in the 429 block)
-    // 2. _retryCount is passed as an argument
-    // 3. + 1 is present in the function (the increment)
-    const recursiveCallIdx = fn.indexOf('return sendTelegram(');
-    assert.ok(recursiveCallIdx !== -1, 'recursive sendTelegram call not found');
-    const afterCall = fn.slice(recursiveCallIdx);
-    assert.ok(
-      /_retryCount/.test(afterCall),
-      'recursive call must pass _retryCount parameter',
-    );
-    assert.ok(
-      /\+\s*1/.test(afterCall),
-      'recursive call must increment retry count with + 1',
-    );
-  });
-
-  it('does not recurse for any status code other than 429', () => {
-    // Count all sendTelegram( calls inside the function body.
-    // There should be exactly 1: the recursive one in the 429 handler.
-    const bodyOnly = fn.slice(fn.indexOf('{') + 1, fn.lastIndexOf('}'));
-    const allCalls = bodyOnly.match(/sendTelegram\s*\(/g) || [];
-    assert.equal(
-      allCalls.length, 1,
-      `sendTelegram body should contain exactly 1 self-call (the 429 retry); found ${allCalls.length}`,
-    );
+  it('returns false on 401 without retry', async () => {
+    let callCount = 0;
+    globalThis.fetch = async () => {
+      callCount++;
+      return makeRes(401, {});
+    };
+    const ok = await sendTelegram('user-1', 'chat-1', 'hello');
+    assert.equal(ok, false, '401 should return false');
+    assert.equal(callCount, 1, '401 must not retry');
   });
 });

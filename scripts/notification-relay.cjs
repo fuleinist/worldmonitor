@@ -293,14 +293,15 @@ async function sendTelegram(userId, chatId, text, _retryCount = 0) {
     return false;
   }
   if (res.status === 429) {
-    if ((_retryCount ?? 0) >= 1) {
+    if (_retryCount >= 1) {
+      res.body?.cancel();
       console.warn(`[relay] Telegram 429 retry limit reached for ${userId} — bailing`);
       return false;
     }
     const body = await res.json().catch(() => ({}));
     const wait = ((body.parameters?.retry_after ?? 5) + 1) * 1000;
     await new Promise(r => setTimeout(r, wait));
-    return sendTelegram(userId, chatId, text, (_retryCount ?? 0) + 1); // single retry
+    return sendTelegram(userId, chatId, text, _retryCount + 1); // single retry
   }
   if (res.status === 401) {
     console.error('[relay] Telegram 401 Unauthorized — TELEGRAM_BOT_TOKEN is invalid or belongs to a different bot; correct the Railway env var to restore Telegram delivery');
@@ -1052,12 +1053,16 @@ async function subscribe() {
   }
 }
 
-process.on('SIGTERM', () => {
-  console.log('[relay] SIGTERM received — shutting down');
-  process.exit(0);
-});
+if (require.main === module) {
+  process.on('SIGTERM', () => {
+    console.log('[relay] SIGTERM received — shutting down');
+    process.exit(0);
+  });
 
-subscribe().catch(err => {
-  console.error('[relay] Fatal error:', err);
-  process.exit(1);
-});
+  subscribe().catch(err => {
+    console.error('[relay] Fatal error:', err);
+    process.exit(1);
+  });
+}
+
+module.exports = { sendTelegram };
