@@ -180,6 +180,11 @@ function spawnSeed(scriptPath, { timeoutMs, label, bundleStartedAtMs }) {
         settle({ elapsed, ok: false, reason: `timeout after ${Math.round(timeoutMs / 1000)}s (signal ${signal || 'SIGTERM'})`, alreadyLogged: true });
       } else if (code === 0) {
         settle({ elapsed, ok: true, seedComplete: lastSeedComplete });
+      } else if (code === 2) {
+        // Exit code 2 = RETRY (graceful failure in contract mode). Do not
+        // treat as ok, but do not alert as a hard failure either — TTL was
+        // already extended by the seeder and bundle will retry next cycle.
+        settle({ elapsed, ok: false, reason: 'graceful_retry', alreadyLogged: false });
       } else {
         settle({ elapsed, ok: false, reason: `exit ${code ?? 'null'}${signal ? ` (signal ${signal})` : ''}` });
       }

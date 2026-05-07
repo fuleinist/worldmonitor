@@ -997,7 +997,7 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
       console.log(`  RETRY: declareRecords returned 0 (zeroIsValid=false) — envelope unchanged, TTL extended, bundle will retry next cycle`);
       console.log(`\n=== Done (${Math.round(durationMs)}ms, RETRY) ===`);
       await releaseLock(`${domain}:${resource}`, runId);
-      process.exit(0);
+      process.exit(2); // RETRY = graceful failure, do not count as OK
     }
 
     const publishResult = await atomicPublish(canonicalKey, publishData, validateFn, ttlSeconds, { envelopeMeta });
